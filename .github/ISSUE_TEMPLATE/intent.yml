@@ -1,0 +1,48 @@
+name: Intent
+description: Propose a change. Accepted intents become intent.md on change/<id>.
+title: "intent: "
+labels: ["intent"]
+body:
+  - type: dropdown
+    id: class
+    attributes:
+      label: Class
+      description: Sets the ceremony this change gets. See process section 4, task classes.
+      options:
+        - feature
+        - infra
+        - security-sensitive
+        - bugfix
+        - spike
+        - docs
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Who cannot do what today, and what it costs them.
+    validations:
+      required: true
+  - type: textarea
+    id: desired-outcome
+    attributes:
+      label: Desired outcome
+      description: What changes for that person when this works.
+    validations:
+      required: true
+  - type: textarea
+    id: success-measure
+    attributes:
+      label: Success measure
+      description: Observable after release, within the operation window. If it cannot be written, the change is too large or too vague.
+    validations:
+      required: true
+  - type: textarea
+    id: invariants-touched
+    attributes:
+      label: Invariants touched
+      description: INV ids from product/invariants.md that this change touches. Write "none" if none. Spec review checks against these.
+      placeholder: none
+    validations:
+      required: true

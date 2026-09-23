@@ -1,0 +1,42 @@
+name: Escape
+description: A defect that reached production. Every escape is attributed to a phase and becomes an eval.
+title: "escape: "
+labels: ["escape"]
+body:
+  - type: input
+    id: change
+    attributes:
+      label: Change
+      description: The change/<id> the defect traces to. Write "unattributed" if it traces to none; it then becomes a reactive intent.
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: What was observed
+      description: Where it surfaced, how it was detected, and what it affected.
+    validations:
+      required: true
+  - type: dropdown
+    id: phase
+    attributes:
+      label: Phase attribution
+      description: The phase that should have caught it. See process section 5.11, attribution vocabulary.
+      options:
+        - intent gap
+        - specification gap
+        - review miss
+        - plan gap
+        - test-plan gap
+        - generation error
+        - verification gap
+        - operational
+    validations:
+      required: true
+  - type: textarea
+    id: eval
+    attributes:
+      label: Eval to add
+      description: The case and its acceptance check. Every escape becomes a permanent eval before its change is closed.
+    validations:
+      required: true
