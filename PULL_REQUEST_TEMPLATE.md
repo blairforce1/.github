@@ -1,10 +1,19 @@
-<!-- Change: the change/<id> this PR lands. Record: decisions/NNNN when the title type is process:, else none. Tick what applies to the class; delete the rest. -->
-Change: <id>
+<!-- Change: id of the changes/<id>/ folder this PR belongs to, or "none" for chores -->
+Change: none
+<!-- Record: the decisions/NNNN record this PR ships, or "none". Required when the title type is process: -->
 Record: none
-Class: feature | infra | security-sensitive | bugfix | spike | docs
 
-- [ ] Intent is merged; class and success measure are unchanged (all)
-- [ ] Every spec-review finding has a disposition (feature, infra, security-sensitive)
-- [ ] Mandatory test tiers pass; no protected test edited without recorded approval (feature, infra, security-sensitive, bugfix)
-- [ ] Cites the escape it closes and adds its eval (bugfix)
-- [ ] Nothing deploys and findings are recorded (spike); a human has read it (docs)
+<!-- Class goes on the PR as a label (class:feature, class:infra, class:security-sensitive,
+     class:bugfix, class:spike, class:docs, class:chore), not in this body. -->
+
+## Summary
+<!-- One or two lines: what changed and why. -->
+
+## Verification
+<!-- What you ran and what it showed, or a link to the run. -->
+
+## Checks
+Tick a box only if it is true. An unticked box needs a one-line reason below it, otherwise the PR is not ready.
+- [ ] Verification run and output shown above
+- [ ] No protected path touched, or the approval is recorded here
+- [ ] Generated content carries provenance (model, skill, prompt)
