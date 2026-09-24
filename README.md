@@ -138,3 +138,4 @@ uvx check-jsonschema --builtin-schema vendor.github-issue-config .github/ISSUE_T
 
 GitHub's own parser runs only once the files are on GitHub. An invalid form
 shows an error banner on this repository's issue chooser.
+

@@ -27,4 +27,3 @@ Every repository owned by blairforce1 that does not ship its own
 
 Only the default branch and the latest tagged release of each repository
 receive fixes.
-
