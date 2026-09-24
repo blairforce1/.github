@@ -26,7 +26,11 @@
 # It cannot find generated content nobody declared. It makes an omission
 # visible, not a false declaration.
 #
-# Pull requests opened by a bot (Dependabot) are passed without checks.
+# A pull request opened by a bot account (a login ending in [bot], such as
+# renovate[bot]) skips the Checks section and the provenance checks, which
+# ask about a template the bot does not fill. Its title, Change line and
+# class label are still checked, so the bot's configuration must supply
+# them: for Renovate, semanticCommits, labels and prBodyNotes.
 # The script is inline so that a caller's @ref pins the rules and the code
 # together; tests/pr-checks.test.sh extracts and runs it. It reads only
 # files and environment; the step before it does every API call.
@@ -93,7 +97,7 @@ jobs:
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
-          PR_AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           LABELS_FILE: ${{ runner.temp }}/labels.json
           COMMITS_FILE: ${{ runner.temp }}/commits.json
           FILES_FILE: ${{ runner.temp }}/files.txt
@@ -108,10 +112,8 @@ jobs:
           fail() { printf '::error%s::%s\n' "${2:+ title=$2}" "$1"; failed=1; }
           note() { printf '::notice title=%s::%s\n' "$2" "$1"; }
 
-          if [ "${PR_AUTHOR_TYPE:-}" = "Bot" ]; then
-            echo "pr-checks: opened by a bot; nothing to check"
-            exit 0
-          fi
+          bot=0
+          case "${PR_AUTHOR:-}" in *'[bot]') bot=1 ;; esac
 
           # Web edits store the body with CRLF line endings.
           body="$(printf '%s' "${PR_BODY:-}" | tr -d '\r')"
@@ -132,42 +134,46 @@ jobs:
 
           # Checks section: from '## Checks' to the next '## ' heading, with
           # HTML comments removed.
-          checks="$(printf '%s\n' "$body" \
-            | perl -0pe 's/<!--.*?-->//gs' \
-            | awk '/^## /{inside = ($0 ~ /^## Checks[[:space:]]*$/); next} inside')"
-          if [ -z "$(printf '%s' "$checks" | tr -d '[:space:]')" ]; then
-            fail "No '## Checks' section. Start the body from the pull request template."
+          if [ "$bot" = 1 ]; then
+            note "Opened by $PR_AUTHOR: the Checks section and provenance are not checked." "Checks section"
           else
-            # An unticked box needs a reason on the very next line.
-            unexplained="$(printf '%s\n' "$checks" | awk '
-              function isbox(s) { return s ~ /^[[:space:]]*[-*] \[[ xX]\] / }
-              pending != "" {
-                if ($0 ~ /^[[:space:]]*$/ || isbox($0)) print pending
-                pending = ""
-              }
-              /^[[:space:]]*[-*] \[ \] / { pending = $0; sub(/^[[:space:]]*[-*] \[ \] /, "", pending) }
-              END { if (pending != "") print pending }')"
-            while IFS= read -r box; do
-              [ -n "$box" ] && fail "Unticked with no reason on the next line: '$box'."
-            done <<< "$unexplained"
-
-            prov="$(printf '%s\n' "$checks" | grep -E '^[[:space:]]*[-*] \[[ xX]\] Generated content carries provenance' || true)"
-            if [ -z "$prov" ]; then
-              fail "The Checks section has no 'Generated content carries provenance' box."
+            checks="$(printf '%s\n' "$body" \
+              | perl -0pe 's/<!--.*?-->//gs' \
+              | awk '/^## /{inside = ($0 ~ /^## Checks[[:space:]]*$/); next} inside')"
+            if [ -z "$(printf '%s' "$checks" | tr -d '[:space:]')" ]; then
+              fail "No '## Checks' section. Start the body from the pull request template."
             else
-              ticked=0
-              printf '%s\n' "$prov" | grep -Eq '\[[xX]\]' && ticked=1
-              recorded=0
-              jq -r '.[]' "$COMMITS_FILE" | tr -d '\r' | grep -Eiq '^co-authored-by: ' && recorded=1
-              printf '%s\n' "$body" | grep -Eq '^Provenance: ' && recorded=1
-              generated=0
-              jq -r '.[]' "$COMMITS_FILE" | tr -d '\r' | grep -Eiq '^co-authored-by: .*noreply@anthropic\.com' && generated=1
-              printf '%s\n' "$body" | grep -Eq 'Generated with ' && generated=1
-              if [ "$ticked" = 1 ] && [ "$recorded" = 0 ]; then
-                fail "Provenance is ticked but not recorded: no commit has a Co-authored-by trailer and the body has no 'Provenance:' line."
-              fi
-              if [ "$ticked" = 0 ] && [ "$generated" = 1 ]; then
-                fail "Generated content is present (an Anthropic co-author trailer or a 'Generated with' line) but the provenance box is unticked."
+              # An unticked box needs a reason on the very next line.
+              unexplained="$(printf '%s\n' "$checks" | awk '
+                function isbox(s) { return s ~ /^[[:space:]]*[-*] \[[ xX]\] / }
+                pending != "" {
+                  if ($0 ~ /^[[:space:]]*$/ || isbox($0)) print pending
+                  pending = ""
+                }
+                /^[[:space:]]*[-*] \[ \] / { pending = $0; sub(/^[[:space:]]*[-*] \[ \] /, "", pending) }
+                END { if (pending != "") print pending }')"
+              while IFS= read -r box; do
+                [ -n "$box" ] && fail "Unticked with no reason on the next line: '$box'."
+              done <<< "$unexplained"
+
+              prov="$(printf '%s\n' "$checks" | grep -E '^[[:space:]]*[-*] \[[ xX]\] Generated content carries provenance' || true)"
+              if [ -z "$prov" ]; then
+                fail "The Checks section has no 'Generated content carries provenance' box."
+              else
+                ticked=0
+                printf '%s\n' "$prov" | grep -Eq '\[[xX]\]' && ticked=1
+                recorded=0
+                jq -r '.[]' "$COMMITS_FILE" | tr -d '\r' | grep -Eiq '^co-authored-by: ' && recorded=1
+                printf '%s\n' "$body" | grep -Eq '^Provenance: ' && recorded=1
+                generated=0
+                jq -r '.[]' "$COMMITS_FILE" | tr -d '\r' | grep -Eiq '^co-authored-by: .*noreply@anthropic\.com' && generated=1
+                printf '%s\n' "$body" | grep -Eq 'Generated with ' && generated=1
+                if [ "$ticked" = 1 ] && [ "$recorded" = 0 ]; then
+                  fail "Provenance is ticked but not recorded: no commit has a Co-authored-by trailer and the body has no 'Provenance:' line."
+                fi
+                if [ "$ticked" = 0 ] && [ "$generated" = 1 ]; then
+                  fail "Generated content is present (an Anthropic co-author trailer or a 'Generated with' line) but the provenance box is unticked."
+                fi
               fi
             fi
           fi
