@@ -40,8 +40,49 @@ accounts.
 - `README.md`: this file describes this repository only. The account
   profile README lives in `blairforce1/blairforce1`.
 - Workflows, `dependabot.yml`, labels, rulesets, branch protection: all per
-  repository. Starter workflows in `workflow-templates/` are an organisation
+  repository. A repository can call a reusable workflow from here; see
+  "Reusable workflows". Starter workflows in `workflow-templates/` are an organisation
   feature and do not apply to a personal account.
+
+## Reusable workflows
+
+Workflows are not inherited: a repository runs one only by calling it.
+`.github/workflows/pr-checks.yml` checks a pull request's title and body
+against the PAP rules. It refuses a title that is not a conventional commit,
+a `process:` title with no `Record: NNNN` line, a box in `## Checks` left
+unticked with no reason on the line below it, a ticked provenance box with
+no `Co-authored-by` trailer on any commit and no `Provenance:` line, and an
+unticked provenance box on a pull request whose commits are co-authored by
+`noreply@anthropic.com` or whose body says "Generated with". It cannot find
+generated content that nobody declared. Pull requests opened by a bot pass
+unchecked.
+
+A repository adopts it with this caller, saved as
+`.github/workflows/pr-checks.yml`:
+
+```yaml
+name: pr-checks
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+permissions:
+  contents: read
+  pull-requests: read
+jobs:
+  pr-checks:
+    uses: blairforce1/.github/.github/workflows/pr-checks.yml@main
+```
+
+The check it reports is named `pr-checks / checks`; that is the context a
+ruleset lists to make it required. `edited` is in the trigger list so that
+fixing the body re-runs the check. The caller pins `@main`: this
+repository's own ruleset guards main, and a fix here reaches every caller
+at once. The script is inline in the workflow, so the ref pins rules and
+code together.
+
+`tests/pr-checks.test.sh` extracts the script and runs it against
+fixtures; `ci.yml` runs the tests and the check itself on every pull
+request here.
 
 ## Verifying inheritance
 

@@ -1,0 +1,125 @@
+# pr-checks.yml: a reusable workflow that checks a pull request's title and
+# body against the PAP rules a reviewer should not have to remember. A
+# repository adopts it with a caller workflow; see README.md.
+#
+# It refuses:
+#   - a title that is not a conventional commit, type(scope): description,
+#     with a type from the list below (rule 1.2 of blairforce1/pap);
+#   - a process: title whose body has no Record: NNNN line (rule 1.2);
+#   - a Checks box left unticked with no reason on the line below it;
+#   - a ticked provenance box with nothing recorded: no Co-authored-by
+#     trailer on any commit and no Provenance: line in the body;
+#   - an unticked provenance box on a pull request that shows generated
+#     content: a commit co-authored by noreply@anthropic.com, or a
+#     "Generated with" line in the body.
+# It cannot find generated content nobody declared. It makes an omission
+# visible, not a false declaration.
+#
+# Pull requests opened by a bot (Dependabot) are passed without checks.
+# The script is inline so that a caller's @ref pins the rules and the code
+# together; tests/pr-checks.test.sh extracts and runs it.
+
+name: pr-checks
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  checks:
+    name: checks
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
+    steps:
+      - name: Fetch commit messages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh api --paginate --slurp "repos/$REPO/pulls/$NUMBER/commits" \
+            | jq '[.[][] | .commit.message]' > "$RUNNER_TEMP/commits.json"
+          jq length "$RUNNER_TEMP/commits.json"
+
+      - name: Check title and body
+        id: check
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
+          COMMITS_FILE: ${{ runner.temp }}/commits.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          failed=0
+          fail() { printf '::error::%s\n' "$1"; failed=1; }
+
+          if [ "${PR_AUTHOR_TYPE:-}" = "Bot" ]; then
+            echo "pr-checks: opened by a bot; nothing to check"
+            exit 0
+          fi
+
+          # Web edits store the body with CRLF line endings.
+          body="$(printf '%s' "${PR_BODY:-}" | tr -d '\r')"
+          title="${PR_TITLE:-}"
+
+          # Title: type(scope): description
+          types='feat|fix|docs|style|refactor|perf|test|build|ci|cli|chore|revert|process'
+          if ! printf '%s\n' "$title" | grep -Eq "^($types)(\([a-z0-9][a-z0-9._/-]*\))?!?: [^ ]"; then
+            fail "Title is not a conventional commit: '$title'. Expected type(scope): description, type one of ${types//|/, }."
+          fi
+
+          # Rule 1.2: a process change names its decision record.
+          if printf '%s\n' "$title" | grep -Eq '^process(\(|!|:)'; then
+            if ! printf '%s\n' "$body" | grep -Eq '^Record: *[0-9]{4}[[:space:]]*$'; then
+              fail "A process: pull request needs a 'Record: NNNN' line naming its decision record."
+            fi
+          fi
+
+          # Checks section: from '## Checks' to the next '## ' heading, with
+          # HTML comments removed.
+          checks="$(printf '%s\n' "$body" \
+            | perl -0pe 's/<!--.*?-->//gs' \
+            | awk '/^## /{inside = ($0 ~ /^## Checks[[:space:]]*$/); next} inside')"
+          if [ -z "$(printf '%s' "$checks" | tr -d '[:space:]')" ]; then
+            fail "No '## Checks' section. Start the body from the pull request template."
+          else
+            # An unticked box needs a reason on the very next line.
+            unexplained="$(printf '%s\n' "$checks" | awk '
+              function isbox(s) { return s ~ /^[[:space:]]*[-*] \[[ xX]\] / }
+              pending != "" {
+                if ($0 ~ /^[[:space:]]*$/ || isbox($0)) print pending
+                pending = ""
+              }
+              /^[[:space:]]*[-*] \[ \] / { pending = $0; sub(/^[[:space:]]*[-*] \[ \] /, "", pending) }
+              END { if (pending != "") print pending }')"
+            while IFS= read -r box; do
+              [ -n "$box" ] && fail "Unticked with no reason on the next line: '$box'."
+            done <<< "$unexplained"
+
+            prov="$(printf '%s\n' "$checks" | grep -E '^[[:space:]]*[-*] \[[ xX]\] Generated content carries provenance' || true)"
+            if [ -z "$prov" ]; then
+              fail "The Checks section has no 'Generated content carries provenance' box."
+            else
+              ticked=0
+              printf '%s\n' "$prov" | grep -Eq '\[[xX]\]' && ticked=1
+              recorded=0
+              jq -r '.[]' "$COMMITS_FILE" | tr -d '\r' | grep -Eiq '^co-authored-by: ' && recorded=1
+              printf '%s\n' "$body" | grep -Eq '^Provenance: ' && recorded=1
+              generated=0
+              jq -r '.[]' "$COMMITS_FILE" | tr -d '\r' | grep -Eiq '^co-authored-by: .*noreply@anthropic\.com' && generated=1
+              printf '%s\n' "$body" | grep -Eq 'Generated with ' && generated=1
+              if [ "$ticked" = 1 ] && [ "$recorded" = 0 ]; then
+                fail "Provenance is ticked but not recorded: no commit has a Co-authored-by trailer and the body has no 'Provenance:' line."
+              fi
+              if [ "$ticked" = 0 ] && [ "$generated" = 1 ]; then
+                fail "Generated content is present (an Anthropic co-author trailer or a 'Generated with' line) but the provenance box is unticked."
+              fi
+            fi
+          fi
+
+          if [ "$failed" = 0 ]; then echo "pr-checks: title and body pass"; fi
+          exit "$failed"
