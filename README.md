@@ -57,8 +57,11 @@ unticked provenance box on a pull request whose commits are co-authored by
 generated content that nobody declared. It also refuses a body with no
 `Change:` line, or with `Change: <id>` when the pull request's head has no
 `changes/<id>/` folder (`Change: none` always passes), and any label set
-without exactly one `class:*` label. Pull requests opened by a bot pass
-unchecked.
+without exactly one `class:*` label. A pull request opened by a bot
+account (a login ending in `[bot]`) skips the `## Checks` and provenance
+checks but not the title, `Change:` line or class label, so the bot's
+configuration has to supply those: for Renovate, `semanticCommits`,
+`labels` and `prBodyNotes`.
 
 When the base branch has a `.github/CODEOWNERS`, the workflow adds the
 `protected-path` label to a pull request whose changed files match any of
