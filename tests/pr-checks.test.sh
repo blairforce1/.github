@@ -32,11 +32,12 @@ run() {
   shift 6 2>/dev/null || shift $#
   if [ $# -gt 0 ]; then printf '%s\0' "$@" | jq -R -s 'split("\u0000") | map(select(length > 0))' > "$work/commits.json"
   else echo '[]' > "$work/commits.json"; fi
+  printf '%s' "$LABELS" > "$work/labels.json"
   printf '%s' "$FILES" > "$work/files.txt"
   printf '%s' "$CHANGES" > "$work/changes.txt"
   rm -f "$work/CODEOWNERS" "$work/output"
   [ -n "${CODEOWNERS+set}" ] && printf '%s\n' "$CODEOWNERS" > "$work/CODEOWNERS"
-  out="$(PR_TITLE="$title" PR_BODY="$body" PR_AUTHOR_TYPE="$author" PR_LABELS="$LABELS" \
+  out="$(PR_TITLE="$title" PR_BODY="$body" PR_AUTHOR_TYPE="$author" LABELS_FILE="$work/labels.json" \
     COMMITS_FILE="$work/commits.json" FILES_FILE="$work/files.txt" CHANGES_FILE="$work/changes.txt" \
     CODEOWNERS_FILE="$work/CODEOWNERS" GITHUB_OUTPUT="$work/output" bash "$work/check.sh" 2>&1)"
   got=$?
