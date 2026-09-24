@@ -54,8 +54,19 @@ unticked with no reason on the line below it, a ticked provenance box with
 no `Co-authored-by` trailer on any commit and no `Provenance:` line, and an
 unticked provenance box on a pull request whose commits are co-authored by
 `noreply@anthropic.com` or whose body says "Generated with". It cannot find
-generated content that nobody declared. Pull requests opened by a bot pass
+generated content that nobody declared. It also refuses a body with no
+`Change:` line, or with `Change: <id>` when the pull request's head has no
+`changes/<id>/` folder (`Change: none` always passes), and any label set
+without exactly one `class:*` label. Pull requests opened by a bot pass
 unchecked.
+
+When the base branch has a `.github/CODEOWNERS`, the workflow adds the
+`protected-path` label to a pull request whose changed files match any of
+its patterns, and removes it on a later push that no longer matches. It
+reads the base branch's file, as GitHub does, so a pull request cannot
+remove its own protection. Without a CODEOWNERS file the label is left to
+people. Change footer, class label and protected paths each report as their
+own annotation, pass or fail.
 
 A repository adopts it with this caller, saved as
 `.github/workflows/pr-checks.yml`:
@@ -64,10 +75,10 @@ A repository adopts it with this caller, saved as
 name: pr-checks
 on:
   pull_request:
-    types: [opened, edited, reopened, synchronize, ready_for_review]
+    types: [opened, edited, reopened, synchronize, ready_for_review, labeled, unlabeled]
 permissions:
   contents: read
-  pull-requests: read
+  pull-requests: write
 jobs:
   pr-checks:
     uses: blairforce1/.github/.github/workflows/pr-checks.yml@main
@@ -75,7 +86,11 @@ jobs:
 
 The check it reports is named `pr-checks / checks`; that is the context a
 ruleset lists to make it required. `edited` is in the trigger list so that
-fixing the body re-runs the check. The caller pins `@main`: this
+fixing the body re-runs the check, and `labeled` and `unlabeled` so that
+fixing the class label does. `pull-requests: write` is needed only to add
+and remove the `protected-path` label; the workflow cannot run with less
+than it declares. On a pull request from a fork the token stays read-only,
+and the label step warns instead of labelling. The caller pins `@main`: this
 repository's own ruleset guards main, and a fix here reaches every caller
 at once. The script is inline in the workflow, so the ref pins rules and
 code together.

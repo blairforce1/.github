@@ -11,13 +11,30 @@
 #     trailer on any commit and no Provenance: line in the body;
 #   - an unticked provenance box on a pull request that shows generated
 #     content: a commit co-authored by noreply@anthropic.com, or a
-#     "Generated with" line in the body.
+#     "Generated with" line in the body;
+#   - a body with no Change: line, or one naming an id for which the pull
+#     request's head has no changes/<id>/ folder (Change: none is always
+#     accepted);
+#   - anything but exactly one class:* label.
+# It also keeps the protected-path label true: when the base branch has a
+# .github/CODEOWNERS, a pull request whose changed files (and the old names
+# of renamed ones) match any of its patterns gets the label, and loses it on
+# a later push that no longer matches. The base branch's file is used, as
+# GitHub does, so a pull request cannot unprotect itself. Patterns are
+# matched by `git check-ignore`, since CODEOWNERS uses gitignore syntax.
+# Each of the last three reports as its own annotation, pass or fail.
 # It cannot find generated content nobody declared. It makes an omission
 # visible, not a false declaration.
 #
 # Pull requests opened by a bot (Dependabot) are passed without checks.
 # The script is inline so that a caller's @ref pins the rules and the code
-# together; tests/pr-checks.test.sh extracts and runs it.
+# together; tests/pr-checks.test.sh extracts and runs it. It reads only
+# files and environment; the step before it does every API call.
+#
+# pull-requests: write is for the protected-path label and nothing else. A
+# caller must grant it, and should trigger on labeled and unlabeled so a
+# class label added after opening re-runs the check. On a pull request from
+# a fork the token stays read-only and the label step warns instead.
 
 name: pr-checks
 
@@ -26,7 +43,7 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
+  pull-requests: write
 
 jobs:
   checks:
@@ -34,15 +51,37 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
     steps:
-      - name: Fetch commit messages
+      - name: Fetch commits, files, change folders and CODEOWNERS
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
         run: |
+          set -euo pipefail
+          # get <path> <out>: a 404 is an absent file, anything else fails.
+          get() {
+            if gh api "$@" 2> "$RUNNER_TEMP/err"; then return 0; fi
+            grep -q 'HTTP 404' "$RUNNER_TEMP/err" && return 1
+            cat "$RUNNER_TEMP/err" >&2; exit 1
+          }
           gh api --paginate --slurp "repos/$REPO/pulls/$NUMBER/commits" \
             | jq '[.[][] | .commit.message]' > "$RUNNER_TEMP/commits.json"
-          jq length "$RUNNER_TEMP/commits.json"
+          gh api --paginate --slurp "repos/$REPO/pulls/$NUMBER/files" \
+            | jq -r '.[][] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/files.txt"
+          if get "repos/$HEAD_REPO/contents/changes?ref=$HEAD_SHA" > "$RUNNER_TEMP/changes.json"; then
+            jq -r '.[] | select(.type == "dir") | .name' "$RUNNER_TEMP/changes.json" > "$RUNNER_TEMP/changes.txt"
+          else
+            : > "$RUNNER_TEMP/changes.txt"
+          fi
+          if ! get -H 'Accept: application/vnd.github.raw' \
+              "repos/$REPO/contents/.github/CODEOWNERS?ref=$BASE_SHA" > "$RUNNER_TEMP/CODEOWNERS"; then
+            rm -f "$RUNNER_TEMP/CODEOWNERS"
+          fi
+          echo "commits: $(jq length "$RUNNER_TEMP/commits.json"), files: $(wc -l < "$RUNNER_TEMP/files.txt"), change folders: $(wc -l < "$RUNNER_TEMP/changes.txt"), CODEOWNERS on base: $([ -f "$RUNNER_TEMP/CODEOWNERS" ] && echo yes || echo no)"
 
       - name: Check title and body
         id: check
@@ -50,12 +89,19 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           COMMITS_FILE: ${{ runner.temp }}/commits.json
+          FILES_FILE: ${{ runner.temp }}/files.txt
+          CHANGES_FILE: ${{ runner.temp }}/changes.txt
+          CODEOWNERS_FILE: ${{ runner.temp }}/CODEOWNERS
         shell: bash
         run: |
           set -euo pipefail
           failed=0
-          fail() { printf '::error::%s\n' "$1"; failed=1; }
+          # fail <message> [title]; note <message> <title>. A title makes the
+          # annotation its own line in the run summary.
+          fail() { printf '::error%s::%s\n' "${2:+ title=$2}" "$1"; failed=1; }
+          note() { printf '::notice title=%s::%s\n' "$2" "$1"; }
 
           if [ "${PR_AUTHOR_TYPE:-}" = "Bot" ]; then
             echo "pr-checks: opened by a bot; nothing to check"
@@ -121,5 +167,80 @@ jobs:
             fi
           fi
 
+          # Change footer: none, or an id with a changes/<id>/ folder in the
+          # head. HTML comments are removed first, as for Checks.
+          t='Change footer'
+          uncommented="$(printf '%s\n' "$body" | perl -0pe 's/<!--.*?-->//gs')"
+          if ! printf '%s\n' "$uncommented" | grep -Eq '^Change:'; then
+            fail "No 'Change:' line. Add 'Change: none', or 'Change: <id>' naming the changes/<id>/ folder this pull request belongs to." "$t"
+          else
+            change="$(printf '%s\n' "$uncommented" | sed -n 's/^Change:[[:space:]]*//p' | head -n 1 | sed 's/[[:space:]]*$//')"
+            if [ "$change" = none ]; then
+              note "Change: none" "$t"
+            elif ! printf '%s\n' "$change" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'; then
+              fail "'Change: $change' is not 'none' or a change id (letters, digits, . _ -)." "$t"
+            elif grep -Fxq -- "$change" "$CHANGES_FILE"; then
+              note "Change: $change, and changes/$change/ exists" "$t"
+            else
+              fail "'Change: $change' names no changes/$change/ folder in the pull request's head. Add the folder, or use 'Change: none'." "$t"
+            fi
+          fi
+
+          # Class label: exactly one class:* label.
+          t='Class label'
+          classes="$(printf '%s' "${PR_LABELS:-[]}" | jq -r '.[] | select(startswith("class:"))')"
+          count="$(printf '%s' "$classes" | grep -c . || true)"
+          if [ "$count" = 1 ]; then
+            note "$classes" "$t"
+          elif [ "$count" = 0 ]; then
+            fail "No class:* label. Add exactly one, such as class:feature or class:chore." "$t"
+          else
+            fail "$count class:* labels: $(printf '%s' "$classes" | paste -sd, - | sed 's/,/, /g'). Keep exactly one." "$t"
+          fi
+
+          # Protected paths: decided here, labelled by the next step.
+          t='Protected paths'
+          protected=''
+          if [ -f "$CODEOWNERS_FILE" ]; then
+            match="$(mktemp -d)"
+            git init -q "$match"
+            { grep -Ev '^[[:space:]]*(#|$)' "$CODEOWNERS_FILE" || true; } | awk '{print $1}' > "$match/patterns"
+            rc=0
+            hits="$(git -C "$match" -c core.excludesFile="$match/patterns" check-ignore --no-index --stdin < "$FILES_FILE")" || rc=$?
+            if [ "$rc" = 0 ]; then
+              protected=true
+              note "Touches protected paths: $(printf '%s' "$hits" | paste -sd, - | sed 's/,/, /g'). The protected-path label is applied; record the approval in the body." "$t"
+            elif [ "$rc" = 1 ]; then
+              protected=false
+              note "No changed file matches .github/CODEOWNERS." "$t"
+            else
+              fail "Could not match the changed files against .github/CODEOWNERS (git check-ignore exit $rc)." "$t"
+            fi
+          else
+            note "No .github/CODEOWNERS on the base branch; the protected-path label is left as it is." "$t"
+          fi
+          printf 'protected=%s\n' "$protected" >> "${GITHUB_OUTPUT:-/dev/null}"
+
           if [ "$failed" = 0 ]; then echo "pr-checks: title and body pass"; fi
           exit "$failed"
+
+      - name: Apply or remove the protected-path label
+        if: always() && steps.check.outputs.protected != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number }}
+          PROTECTED: ${{ steps.check.outputs.protected }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          has="$(printf '%s' "$PR_LABELS" | jq 'index("protected-path") != null')"
+          if [ "$PROTECTED" = true ] && [ "$has" = false ]; then
+            gh api -X POST "repos/$REPO/issues/$NUMBER/labels" -f 'labels[]=protected-path' > /dev/null \
+              || echo "::warning title=Protected paths::Could not add the protected-path label; the token may be read-only (a fork)."
+          elif [ "$PROTECTED" = false ] && [ "$has" = true ]; then
+            gh api -X DELETE "repos/$REPO/issues/$NUMBER/labels/protected-path" > /dev/null \
+              || echo "::warning title=Protected paths::Could not remove the protected-path label; the token may be read-only (a fork)."
+          fi
+          echo "protected=$PROTECTED, label was present: $has"
