@@ -26,6 +26,16 @@
 # Scanner versions are pinned here, not in the calling repository, so every
 # caller scans with the same tools and a bump lands once. Every action is
 # pinned by commit.
+#
+# The scanner jobs do not use mise-action's cache. Its key hashes the
+# repository's mise configuration, not what a job installs, so every job in
+# a run computes the same key, and only the check job writes it (the action
+# saves only when it installs). A scanner job restored the check job's tools
+# with it: in pap, which pins uv and has no root mise.toml, the restored uv
+# shim was on PATH, semgrep's pipx install called it, and a shim with no
+# version set fails ("No version is set for shim: uv"). A scanner job's own
+# cache key would never be written, so there is nothing for it to cache; the
+# scanners install at their pinned versions on every run.
 
 name: security
 
@@ -103,6 +113,8 @@ jobs:
         with:
           version: ${{ env.MISE_VERSION }}
           install: false
+          # See the header: the check job's cache is not theirs to restore.
+          cache: false
       - name: Scan the pull request's commits
         id: scan
         env:
@@ -195,6 +207,8 @@ jobs:
         with:
           version: ${{ env.MISE_VERSION }}
           install: false
+          # See the header: the check job's cache is not theirs to restore.
+          cache: false
       - name: Scan with the community rules
         id: scan
         shell: bash
@@ -233,6 +247,8 @@ jobs:
         with:
           version: ${{ env.MISE_VERSION }}
           install: false
+          # See the header: the check job's cache is not theirs to restore.
+          cache: false
       - name: Scan the working tree
         id: scan
         shell: bash

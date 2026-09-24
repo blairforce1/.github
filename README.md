@@ -132,6 +132,10 @@ not in the calling repository: every caller scans with the same tools, and
 a bump lands once. Every action is pinned by commit. The Semgrep rules are
 under the Semgrep Rules License v1.0, which permits scanning your own code.
 
+The scanner jobs do not read mise-action's cache: the key is the same in
+every job and only `check` writes it, so a scanner would inherit the
+calling repository's tools. `tests/security.test.sh` fails if one does.
+
 A repository adopts it with this caller, saved as
 `.github/workflows/security.yml`. The pap base template ships it.
 
