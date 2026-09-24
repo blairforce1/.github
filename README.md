@@ -99,6 +99,67 @@ code together.
 fixtures; `ci.yml` runs the tests and the check itself on every pull
 request here.
 
+### security
+
+`.github/workflows/security.yml` scans a pull request with open-source
+tools. GitHub code scanning and secret scanning are not available on a
+private repository under a Pro account; this is what those repositories
+get instead. It is also the server-side backstop for the git hooks, which
+an agent session may not skip (pap decision 0005) but a person can. Four
+jobs, each its own check:
+
+| Check | What it runs |
+|---|---|
+| `security / check` | `mise run check` at the repository's own tool pins: every check the hooks run, from the same `.config/mise/conf.d/` fragments, on the whole repository. |
+| `security / gitleaks` | `gitleaks git` over the pull request's commits, base to head, with the repository's `.gitleaks.toml`. |
+| `security / semgrep` | Semgrep with the community rules for C#, Go, YAML (GitHub Actions, Compose, Kubernetes) and Dockerfiles, from `semgrep/semgrep-rules` at a pinned commit, honouring `.semgrepignore`. |
+| `security / trivy` | `trivy fs` for vulnerable dependencies, misconfiguration and secrets, honouring `trivy.yaml`. |
+
+A finding at high or critical fails its check; a lower one is a warning.
+Trivy's SARIF level is `error` for HIGH and CRITICAL, Semgrep's for rules
+at `ERROR`; gitleaks has no severities, so every secret fails. Every
+finding is annotated on the diff and listed in the job summary. On a
+public repository, a pull request from a branch of the same repository
+also uploads SARIF to code scanning, one category per tool, beside
+CodeQL's default setup. A fork's token cannot write security events, so a
+fork gets the summary only.
+
+Scanner versions and the rules commit are pinned in the workflow's `env`,
+not in the calling repository: every caller scans with the same tools, and
+a bump lands once. Every action is pinned by commit. The Semgrep rules are
+under the Semgrep Rules License v1.0, which permits scanning your own code.
+
+A repository adopts it with this caller, saved as
+`.github/workflows/security.yml`. The pap base template ships it.
+
+```yaml
+name: security
+on:
+  pull_request:
+permissions:
+  contents: read
+  security-events: write
+jobs:
+  security:
+    uses: blairforce1/.github/.github/workflows/security.yml@main
+```
+
+`security-events: write` is needed only for the upload, but the reusable
+workflow declares it and will not start with less, so a private
+repository grants it too. A repository that defines no mise `check` task
+fails `security / check` with a message saying so; pass
+`with: { mise-check: false }` until it adopts the base layer.
+
+Why not CodeQL: the CodeQL CLI's licence permits it only on open-source
+codebases, which rules it out for the private repositories this workflow
+exists for. The public ones, this repository and pap, already have CodeQL
+through code scanning's default setup, so running it here would duplicate
+that.
+
+`ci.yml` calls this workflow from the branch under review, as it does
+pr-checks, with `mise-check: false` because this repository has no mise
+configuration.
+
 ## Verifying inheritance
 
 Pick a private repository with no templates of its own, for example
