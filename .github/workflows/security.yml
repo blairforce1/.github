@@ -1,0 +1,247 @@
+# security.yml: a reusable workflow that scans a pull request with
+# open-source tools, in place of GitHub code scanning and secret scanning,
+# which a private repository on a Pro account does not get. It is also the
+# server-side backstop for the git hooks: a hook can be skipped, this runs on
+# every pull request. A repository adopts it with a caller workflow; see
+# README.md.
+#
+# Four jobs, each its own check:
+#   check     `mise run check`, the task the hooks' checks come from, on the
+#             whole repository, at the repository's own tool pins.
+#   gitleaks  secrets in the pull request's commits, base..head.
+#   semgrep   Semgrep's community rules for C#, Go, YAML (GitHub Actions,
+#             Compose, Kubernetes) and Dockerfiles, from semgrep/semgrep-rules
+#             at a pinned commit.
+#   trivy     `trivy fs`: vulnerable dependencies, misconfiguration and
+#             secrets in the working tree.
+#
+# Gate: a finding at high or critical fails its job; a lower one is a
+# warning. Trivy and Semgrep report the level in SARIF (error is high or
+# critical for Trivy, ERROR for Semgrep); gitleaks has no levels, and every
+# secret fails. Every finding is annotated on the diff and listed in the job
+# summary. On a public repository, same-repository pull requests also upload
+# SARIF to code scanning, one category per tool. A fork's token cannot write
+# security events, so a fork gets the summary only.
+#
+# Scanner versions are pinned here, not in the calling repository, so every
+# caller scans with the same tools and a bump lands once. Every action is
+# pinned by commit.
+
+name: security
+
+on:
+  workflow_call:
+    inputs:
+      mise-check:
+        description: Run `mise run check`. Turn off only in a repository that defines no check task.
+        type: boolean
+        default: true
+
+# security-events: write is for the SARIF upload on public repositories. A
+# reusable workflow gets no more than its caller grants, and does not start
+# if it declares more, so a caller grants it on private repositories too.
+permissions:
+  contents: read
+  security-events: write
+
+env:
+  GITLEAKS_VERSION: 8.30.1
+  SEMGREP_VERSION: 1.178.0
+  TRIVY_VERSION: 0.74.0
+  # semgrep/semgrep-rules, develop branch, 2026-09-22. Licensed under the
+  # Semgrep Rules License v1.0, which allows this use: scanning our own code.
+  SEMGREP_RULES_SHA: a84ff9cc2453ca91d581380de4b8b3f272f6f4be
+  # mise itself, which jdx/mise-action installs; unpinned, it takes the
+  # latest release, and a mise release changed how the scanners install.
+  MISE_VERSION: 2026.9.12
+  MISE_YES: "1"
+
+jobs:
+  check:
+    name: check
+    if: inputs.mise-check
+    runs-on: ubuntu-latest
+    env:
+      CI: "true"
+      # The repository's own tools, from its own configuration.
+      MISE_TRUSTED_CONFIG_PATHS: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # check:gitleaks scans the whole history.
+          fetch-depth: 0
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          version: ${{ env.MISE_VERSION }}
+      - name: mise run check
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! mise tasks info check > /dev/null 2>&1; then
+            echo "::error title=check::This repository defines no mise 'check' task. Add the PAP base layer, or call this workflow with mise-check: false."
+            exit 1
+          fi
+          mise run check
+
+  gitleaks:
+    name: gitleaks
+    if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    env:
+      TOOL: gitleaks
+      # The scanners run at the versions pinned above, whatever the
+      # repository pins: its configuration is not read, so a tool it
+      # configures cannot change how a scanner installs (pap's uv did).
+      MISE_IGNORED_CONFIG_PATHS: ${{ github.workspace }}
+      # gitleaks has no severities: every secret is high.
+      GATE_ALL: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          version: ${{ env.MISE_VERSION }}
+          install: false
+      - name: Scan the pull request's commits
+        id: scan
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # .gitleaks.toml at the root is read when present. --redact keeps
+          # the secret out of the log, the summary and the SARIF.
+          mise exec "gitleaks@$GITLEAKS_VERSION" -- gitleaks git \
+            --log-opts="--no-merges $BASE_SHA..$HEAD_SHA" \
+            --redact --no-banner --exit-code 0 \
+            --report-format sarif --report-path "$RUNNER_TEMP/$TOOL.sarif" .
+      - &upload
+        name: Upload SARIF to code scanning
+        if: >-
+          !cancelled() && steps.scan.outcome == 'success'
+          && github.event.repository.private == false
+          && github.event.pull_request.head.repo.full_name == github.repository
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          sarif_file: ${{ runner.temp }}/${{ env.TOOL }}.sarif
+          category: ${{ env.TOOL }}
+      - &gate
+        name: Report and gate
+        if: ${{ !cancelled() && steps.scan.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # One row per finding: gate, severity, rule, file, line, message.
+          # A result's level defaults to its rule's (SARIF 3.27.10), and to
+          # warning when neither says.
+          jq -r --arg all "${GATE_ALL:-false}" '
+            .runs[] | ((.tool.driver.rules // []) | map({key: .id, value: .}) | from_entries) as $rules
+            | .results[]
+            | (.level // $rules[.ruleId].defaultConfiguration.level // "warning") as $level
+            | (($rules[.ruleId].properties.tags // []) | map(select(test("^(CRITICAL|HIGH|MEDIUM|LOW|UNKNOWN)$"))) | first) as $tagged
+            | .locations[0].physicalLocation as $loc
+            | [
+                (if $all == "true" or $level == "error" then "high" else "low" end),
+                (if $all == "true" then "HIGH" else $tagged // ({error: "HIGH", warning: "MEDIUM", note: "LOW", none: "LOW"}[$level] // "MEDIUM") end),
+                .ruleId,
+                ($loc.artifactLocation.uri // ""),
+                ($loc.region.startLine // 1),
+                # Semgrep and gitleaks lead with the finding. Trivy leads with
+                # the artifact: a misconfiguration has it after "Message: ",
+                # a vulnerability or secret in the shortDescription of its rule.
+                ((.message.text | split("\n")[0]) as $first
+                  | (.message.text | capture("Message: (?<m>[^\n]*)").m)
+                    // (if $first | test("^(Artifact|Package): ") then $rules[.ruleId].shortDescription.text else null end)
+                    // $first
+                  | .[0:200])
+              ] | @tsv' "$RUNNER_TEMP/$TOOL.sarif" > "$RUNNER_TEMP/$TOOL.tsv"
+          high="$(awk -F'\t' '$1 == "high"' "$RUNNER_TEMP/$TOOL.tsv" | wc -l)"
+          low="$(awk -F'\t' '$1 == "low"' "$RUNNER_TEMP/$TOOL.tsv" | wc -l)"
+          {
+            printf '## %s: %s high or critical, %s lower\n\n' "$TOOL" "$high" "$low"
+            if [ $((high + low)) -gt 0 ]; then
+              printf '| Gate | Severity | Rule | Location | Message |\n|---|---|---|---|---|\n'
+              sort -t "$(printf '\t')" -k1,1 "$RUNNER_TEMP/$TOOL.tsv" \
+                | awk -F'\t' '{ gsub(/\|/, "\\|"); printf "| %s | %s | `%s` | `%s:%s` | %s |\n", ($1 == "high" ? "fail" : "warn"), $2, $3, $4, $5, $6 }'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          while IFS="$(printf '\t')" read -r gate severity rule file line message; do
+            kind=warning; [ "$gate" = high ] && kind=error
+            message="$(printf '%s' "$message" | sed 's/%/%25/g')"
+            printf '::%s file=%s,line=%s,title=%s %s %s::%s\n' "$kind" "$file" "$line" "$TOOL" "$severity" "$rule" "$message"
+          done < "$RUNNER_TEMP/$TOOL.tsv"
+          echo "$TOOL: $high high or critical, $low lower"
+          [ "$high" = 0 ]
+
+  semgrep:
+    name: semgrep
+    runs-on: ubuntu-latest
+    env:
+      TOOL: semgrep
+      # The scanners run at the versions pinned above, whatever the
+      # repository pins: its configuration is not read, so a tool it
+      # configures cannot change how a scanner installs (pap's uv did).
+      MISE_IGNORED_CONFIG_PATHS: ${{ github.workspace }}
+      # semgrep-core's io_uring backend fails at random with "Cannot
+      # allocate memory io_uring_queue_init" when the memlock limit is low
+      # for the core count (measured on a 24-core host, 1 run in 3). The
+      # POSIX backend has no such limit.
+      EIO_BACKEND: posix
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          version: ${{ env.MISE_VERSION }}
+          install: false
+      - name: Scan with the community rules
+        id: scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          rules="$RUNNER_TEMP/semgrep-rules"
+          mkdir -p "$rules"
+          curl -fsSL "https://github.com/semgrep/semgrep-rules/archive/$SEMGREP_RULES_SHA.tar.gz" \
+            | tar -xz -C "$rules" --strip-components=1
+          # yaml/ holds the GitHub Actions rules as well as Compose and
+          # Kubernetes. .semgrepignore at the root is read when present.
+          mise exec "pipx:semgrep@$SEMGREP_VERSION" -- semgrep scan --metrics=off --quiet \
+            --config "$rules/csharp" --config "$rules/go" --config "$rules/yaml" --config "$rules/dockerfile" \
+            --sarif-output="$RUNNER_TEMP/raw.sarif" > /dev/null
+          # A rule's id is prefixed with the dotted path of its config
+          # directory; strip it, so alerts are named by rule and not by
+          # runner path.
+          prefix="$(printf '%s' "$rules" | sed 's#^/##; s#/#.#g')."
+          jq --arg p "$prefix" 'walk(if type == "string" and startswith($p) then ltrimstr($p) else . end)' \
+            "$RUNNER_TEMP/raw.sarif" > "$RUNNER_TEMP/$TOOL.sarif"
+      - *upload
+      - *gate
+
+  trivy:
+    name: trivy
+    runs-on: ubuntu-latest
+    env:
+      TOOL: trivy
+      # The scanners run at the versions pinned above, whatever the
+      # repository pins: its configuration is not read, so a tool it
+      # configures cannot change how a scanner installs (pap's uv did).
+      MISE_IGNORED_CONFIG_PATHS: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          version: ${{ env.MISE_VERSION }}
+          install: false
+      - name: Scan the working tree
+        id: scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          # trivy.yaml at the root is read when present. Every severity is
+          # reported; the gate decides what fails.
+          mise exec "trivy@$TRIVY_VERSION" -- trivy fs --quiet \
+            --scanners vuln,misconfig,secret \
+            --format sarif --output "$RUNNER_TEMP/$TOOL.sarif" .
+      - *upload
+      - *gate
