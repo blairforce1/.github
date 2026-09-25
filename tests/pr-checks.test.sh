@@ -166,7 +166,9 @@ run "Approved-by naming a non-owner"               1 "'Approved-by: @someone' na
 approve
 run "Approved-by with anything after the login"    1 "has no 'Approved-by: @login' line" "feat: x" "$(checks "$V" "$P" "$G" "$A pending")" User "$CLAUDE"
 approve
-run "Approved-by in lower case is not the key"     1 "has no 'Approved-by: @login' line" "feat: x" "$(checks "$V" "$P" "$G" 'approved-by: @blairforce1')" User "$CLAUDE"
+run "the key in lower case"                        0 "Approved-by: @blairforce1" "feat: x" "$(checks "$V" "$P" "$G" 'approved-by: @blairforce1')" User "$CLAUDE"
+approve
+run "the key in trailer case"                      0 "Approved-by: @blairforce1" "feat: x" "$(checks "$V" "$P" "$G" 'Approved-By: @blairforce1')" User "$CLAUDE"
 approve
 run "Approved-by only inside an HTML comment"      1 "has no 'Approved-by: @login' line" "feat: x" "$(checks "$V" "$P" "$G" $'<!--\nApproved-by: @blairforce1\n-->')" User "$CLAUDE"
 TWO=$'/infra/** @ops\n/docs/** @writer @Ops'

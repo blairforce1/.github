@@ -67,7 +67,8 @@ When the base branch has a `.github/CODEOWNERS`, the workflow adds the
 `protected-path` label to a pull request whose changed files have an owner
 in it, and removes it on a later push that no longer does. As in
 CODEOWNERS, the last matching line decides a file's owners. Such a pull
-request also needs an `Approved-by: @login` line in its body naming an
+request also needs an `Approved-by: @login` line in its body, the key in
+any case, naming an
 owner of every protected file, whether its protected-path box is ticked or
 not; a reason under the box does not stand in for it, and bots are not
 exempt (decision 0012 of `blairforce1/pap`). The check cannot tell who
