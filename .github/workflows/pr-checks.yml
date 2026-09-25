@@ -17,10 +17,10 @@
 #     accepted);
 #   - anything but exactly one class:* label;
 #   - a pull request touching a protected path whose body has no
-#     `Approved-by: @login` line naming an owner of every protected file,
-#     whether its protected-path box is ticked or not: a reason under the
-#     box does not stand in for an approval (decision 0012 of
-#     blairforce1/pap). Bots are not exempt.
+#     `Approved-by: @login` line (the key in any case) naming an owner of
+#     every protected file, whether its protected-path box is ticked or
+#     not: a reason under the box does not stand in for an approval
+#     (decision 0012 of blairforce1/pap). Bots are not exempt.
 # It also keeps the protected-path label true: when the base branch has a
 # .github/CODEOWNERS, a pull request whose changed files (and the old names
 # of renamed ones) have an owner in it gets the label, and loses it on a
@@ -258,7 +258,7 @@ jobs:
                 files="$(printf '%s\n' "$owned" | cut -f1 | paste -sd, - | sed 's/,/, /g')"
                 login='@[A-Za-z0-9][A-Za-z0-9-]*(/[A-Za-z0-9_.-]+)?'
                 approvers="$(printf '%s\n' "$uncommented" \
-                  | grep -E "^[[:space:]]*Approved-by: *$login( *, *$login)*[[:space:]]*$" \
+                  | grep -Ei "^[[:space:]]*Approved-by: *$login( *, *$login)*[[:space:]]*$" \
                   | grep -oE "$login" | tr '[:upper:]' '[:lower:]' | sort -u | paste -sd, - || true)"
                 if [ -z "$approvers" ]; then
                   fail "Touches protected paths ($files) but the body has no 'Approved-by: @login' line. An owner from .github/CODEOWNERS ($(printf '%s\n' "$owned" | cut -f2 | tr ' ' '\n' | grep . | sort -u | paste -sd, - | sed 's/,/, /g')) writes it before merge; a reason under the box does not stand in for it." "$t"
