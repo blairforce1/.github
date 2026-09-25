@@ -67,12 +67,15 @@ When the base branch has a `.github/CODEOWNERS`, the workflow adds the
 `protected-path` label to a pull request whose changed files have an owner
 in it, and removes it on a later push that no longer does. As in
 CODEOWNERS, the last matching line decides a file's owners. Such a pull
-request also needs an `Approved-by: @login` line in its body, the key in
-any case, naming an
-owner of every protected file, whether its protected-path box is ticked or
-not; a reason under the box does not stand in for it, and bots are not
-exempt (decision 0012 of `blairforce1/pap`). The check cannot tell who
-typed the line. It reads the base branch's file, as GitHub does, so a pull
+request also needs an `Approved-by: @login <sha>` line in its body, the
+key in any case, naming an owner of every protected file, whether its
+protected-path box is ticked or not; a reason under the box does not stand
+in for it, and bots are not exempt (decision 0012 of `blairforce1/pap`).
+The SHA, 7 to 40 hex characters, is a prefix of the head commit the owner
+approves. A line naming any other commit is stale and one without a SHA is
+refused, so every push, force push or rebase needs a new approval
+(decision 0013); the refusal prints the line to paste, with the current
+head's short SHA. The check cannot tell who typed the line. It reads the base branch's file, as GitHub does, so a pull
 request cannot remove its own protection. Without a CODEOWNERS file the
 label is left to people. Change footer, class label and protected paths each report as their
 own annotation, pass or fail.

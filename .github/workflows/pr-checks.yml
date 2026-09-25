@@ -17,10 +17,14 @@
 #     accepted);
 #   - anything but exactly one class:* label;
 #   - a pull request touching a protected path whose body has no
-#     `Approved-by: @login` line (the key in any case) naming an owner of
-#     every protected file, whether its protected-path box is ticked or
-#     not: a reason under the box does not stand in for an approval
-#     (decision 0012 of blairforce1/pap). Bots are not exempt.
+#     `Approved-by: @login <sha>` line (the key in any case) naming an
+#     owner of every protected file, whether its protected-path box is
+#     ticked or not: a reason under the box does not stand in for an
+#     approval (decision 0012 of blairforce1/pap). Bots are not exempt.
+#     The SHA, 7 to 40 hex characters, is a prefix of the head commit the
+#     owner approves; a line naming any other commit is stale, and one
+#     with no SHA is refused, so every push needs a new approval
+#     (decision 0013). The refusal prints the line to paste.
 # It also keeps the protected-path label true: when the base branch has a
 # .github/CODEOWNERS, a pull request whose changed files (and the old names
 # of renamed ones) have an owner in it gets the label, and loses it on a
@@ -112,6 +116,7 @@ jobs:
           FILES_FILE: ${{ runner.temp }}/files.txt
           CHANGES_FILE: ${{ runner.temp }}/changes.txt
           CODEOWNERS_FILE: ${{ runner.temp }}/CODEOWNERS
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         shell: bash
         run: |
           set -euo pipefail
@@ -256,12 +261,34 @@ jobs:
                 # protected file approves it in the body, whatever the box
                 # says. A reason under the box does not stand in for it.
                 files="$(printf '%s\n' "$owned" | cut -f1 | paste -sd, - | sed 's/,/, /g')"
+                everyone="$(printf '%s\n' "$owned" | cut -f2 | tr ' ' '\n' | grep . | tr '[:upper:]' '[:lower:]' | sort -u | paste -sd, - | sed 's/,/, /g')"
+                # Decision 0013: an approval is for one commit. The line
+                # names a 7 to 40 hex prefix of the head it approves; any
+                # other head makes it stale, so a push needs a new one.
+                head="$(printf '%s' "${HEAD_SHA:-}" | tr '[:upper:]' '[:lower:]')"
+                paste_line="Approved-by: $everyone ${head:0:7}"
                 login='@[A-Za-z0-9][A-Za-z0-9-]*(/[A-Za-z0-9_.-]+)?'
-                approvers="$(printf '%s\n' "$uncommented" \
-                  | grep -Ei "^[[:space:]]*Approved-by: *$login( *, *$login)*[[:space:]]*$" \
-                  | grep -oE "$login" | tr '[:upper:]' '[:lower:]' | sort -u | paste -sd, - || true)"
+                approvers='' refused=''
+                while IFS= read -r line; do
+                  line="$(printf '%s' "$line" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+                  sha="$(printf '%s\n' "$line" | grep -Eio "^Approved-by: *$login( *, *$login)* +[0-9a-f]{7,40}$" | grep -Eo '[0-9A-Fa-f]+$' | tr '[:upper:]' '[:lower:]' || true)"
+                  if [ -z "$sha" ]; then
+                    refused="$refused"$'\n'"'$line' names no head commit (a 7 to 40 character SHA after the logins)"
+                  elif [ -z "$head" ] || [ "${head#"$sha"}" = "$head" ]; then
+                    refused="$refused"$'\n'"'$line' is stale: it approves $sha, the head is ${head:0:7}"
+                  else
+                    approvers="$approvers,$(printf '%s\n' "$line" | grep -oE "$login" | tr '[:upper:]' '[:lower:]' | paste -sd, -)"
+                  fi
+                done < <(printf '%s\n' "$uncommented" | grep -Ei '^[[:space:]]*Approved-by:' || true)
+                approvers="$(printf '%s\n' "${approvers#,}" | tr ',' '\n' | grep . | sort -u | paste -sd, - || true)"
                 if [ -z "$approvers" ]; then
-                  fail "Touches protected paths ($files) but the body has no 'Approved-by: @login' line. An owner from .github/CODEOWNERS ($(printf '%s\n' "$owned" | cut -f2 | tr ' ' '\n' | grep . | sort -u | paste -sd, - | sed 's/,/, /g')) writes it before merge; a reason under the box does not stand in for it." "$t"
+                  if [ -z "$refused" ]; then
+                    fail "Touches protected paths ($files) but the body has no 'Approved-by: @login <sha>' line. An owner from .github/CODEOWNERS ($everyone) writes it before merge; a reason under the box does not stand in for it. Paste: $paste_line" "$t"
+                  else
+                    while IFS= read -r why; do
+                      [ -n "$why" ] && fail "Touches protected paths ($files): $why. An owner approves the current head. Paste: $paste_line" "$t"
+                    done <<< "$refused"
+                  fi
                 else
                   unapproved="$(printf '%s\n' "$owned" | awk -F'\t' -v ok="$approvers" '
                     BEGIN { n = split(ok, a, ","); for (i = 1; i <= n; i++) set[a[i]] = 1 }
@@ -270,10 +297,10 @@ jobs:
                       if (!hit) print $1 "\t" $2 }')"
                   if [ -n "$unapproved" ]; then
                     while IFS=$'\t' read -r file owners; do
-                      fail "'Approved-by: ${approvers//,/, }' names no owner of $file (owners: ${owners// /, })." "$t"
+                      fail "'Approved-by: ${approvers//,/, } ${head:0:7}' names no owner of $file (owners: ${owners// /, }). Paste: $paste_line" "$t"
                     done <<< "$unapproved"
                   else
-                    note "Touches protected paths: $files. Approved-by: ${approvers//,/, }, an owner of each." "$t"
+                    note "Touches protected paths: $files. Approved-by: ${approvers//,/, }, an owner of each, at head ${head:0:7}." "$t"
                   fi
                 fi
               fi

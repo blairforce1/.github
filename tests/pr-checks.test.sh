@@ -23,7 +23,9 @@ pass=0; failures=0
 #   CHANGES     changes/<id>/ folders in the head, one id per line
 #   CODEOWNERS  the base branch's .github/CODEOWNERS; unset means absent
 #   PROTECTED   expected protected= step output: true, false or empty
-reset() { LABELS='["class:feature"]'; FILES=''; CHANGES=''; unset CODEOWNERS PROTECTED; }
+#   HEAD_SHA    the pull request's head commit
+HEAD1=3f9c2a7e5b1d4c6a8e0f2b4d6c8a0e2f4b6d8c0a
+reset() { LABELS='["class:feature"]'; FILES=''; CHANGES=''; HEAD_SHA="$HEAD1"; unset CODEOWNERS PROTECTED; }
 reset
 
 # run <name> <expected exit> <expected text or ""> <title> <body> [author login] [commit message...]
@@ -39,7 +41,7 @@ run() {
   [ -n "${CODEOWNERS+set}" ] && printf '%s\n' "$CODEOWNERS" > "$work/CODEOWNERS"
   out="$(PR_TITLE="$title" PR_BODY="$body" PR_AUTHOR="$author" LABELS_FILE="$work/labels.json" \
     COMMITS_FILE="$work/commits.json" FILES_FILE="$work/files.txt" CHANGES_FILE="$work/changes.txt" \
-    CODEOWNERS_FILE="$work/CODEOWNERS" GITHUB_OUTPUT="$work/output" bash "$work/check.sh" 2>&1)"
+    CODEOWNERS_FILE="$work/CODEOWNERS" HEAD_SHA="$HEAD_SHA" GITHUB_OUTPUT="$work/output" bash "$work/check.sh" 2>&1)"
   got=$?
   local output_ok=1
   if [ -n "${PROTECTED+set}" ] && ! grep -Fxq "protected=$PROTECTED" "$work/output" 2>/dev/null; then
@@ -57,10 +59,10 @@ checks() { # checks <box1> <box2> <box3> [trailing text]
   printf 'Change: none\n\n## Summary\nSomething.\n\n## Checks\nTick a box only if it is true. An unticked box needs a one-line reason below it, otherwise the PR is not ready.\n%s\n%s\n%s\n%s' "$1" "$2" "$3" "${4:-}"
 }
 V='- [x] Verification run and output shown above'
-P='- [x] No protected path touched, or an owner has written `Approved-by: @login` below'
+P='- [x] No protected path touched, or an owner has approved the head: `Approved-by: @login <sha>` below'
 G='- [x] Generated content carries provenance (model, skill, prompt)'
 Vu='- [ ] Verification run and output shown above'
-Pu='- [ ] No protected path touched, or an owner has written `Approved-by: @login` below'
+Pu='- [ ] No protected path touched, or an owner has approved the head: `Approved-by: @login <sha>` below'
 Gu='- [ ] Generated content carries provenance (model, skill, prompt)'
 CLAUDE=$'build(x): y\n\nCo-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>'
 HUMAN=$'docs: fix a typo'
@@ -128,7 +130,7 @@ run "two class labels, both named"                 1 "2 class:* labels: class:fe
 
 # Protected paths.
 CO=$'# generated\n\n/infra/** @blairforce1\n**/*.test.* @blairforce1\n/CLAUDE.md @blairforce1'
-A='Approved-by: @blairforce1'
+A='Approved-by: @blairforce1 3f9c2a7'
 CODEOWNERS="$CO"; FILES=$'README.md\ninfra/main.tf\nsrc/a.test.ts'; PROTECTED=true
 run "diff touches protected paths, approved"       0 "Touches protected paths: infra/main.tf, src/a.test.ts. Approved-by: @blairforce1" "feat: x" "$(checks "$V" "$P" "$G" "$A")" User "$CLAUDE"
 CODEOWNERS="$CO"; FILES=$'README.md\nsrc/CLAUDE.md\ninfrastructure/x'; PROTECTED=false
@@ -148,44 +150,77 @@ run "protected, and another check fails"           1 "No 'Change:' line" "feat: 
 approve() { CODEOWNERS="$CO"; FILES='infra/main.tf'; PROTECTED=true; }
 R="      Adds infra/main.tf. Approval is blairforce1's to record here before merge."
 approve
-run "#46: unticked, approval deferred"             1 "has no 'Approved-by: @login' line. An owner from .github/CODEOWNERS (@blairforce1)" "feat: x" "$(checks "$V" "$Pu"$'\n'"$R" "$G")" User "$CLAUDE"
+run "#46: unticked, approval deferred"             1 "has no 'Approved-by: @login <sha>' line. An owner from .github/CODEOWNERS (@blairforce1)" "feat: x" "$(checks "$V" "$Pu"$'\n'"$R" "$G")" User "$CLAUDE"
 approve
-run "#47: ticked, nothing recorded"                1 "has no 'Approved-by: @login' line" "docs: x" "$(checks "$V" "$P" "$G")" User "$CLAUDE"
+run "#47: ticked, nothing recorded"                1 "has no 'Approved-by: @login <sha>' line" "docs: x" "$(checks "$V" "$P" "$G")" User "$CLAUDE"
 approve
-run "#48: approval in prose, not a line"           1 "has no 'Approved-by: @login' line" "feat: x" "$(checks "$V" "$Pu"$'\n'"$R"$'\n      Approved by blairforce1 on 2026-09-25, recorded after the merge.' "$G")" User "$CLAUDE"
+run "#48: approval in prose, not a line"           1 "has no 'Approved-by: @login <sha>' line" "feat: x" "$(checks "$V" "$Pu"$'\n'"$R"$'\n      Approved by blairforce1 on 2026-09-25, recorded after the merge.' "$G")" User "$CLAUDE"
 approve
-run "#49: 'Approved by blairforce1.' in prose"     1 "has no 'Approved-by: @login' line" "docs: x" "$(checks "$V" "$Pu"$'\n'"$R"$'\n      Approved by blairforce1.' "$G")" User "$CLAUDE"
+run "#49: 'Approved by blairforce1.' in prose"     1 "has no 'Approved-by: @login <sha>' line" "docs: x" "$(checks "$V" "$Pu"$'\n'"$R"$'\n      Approved by blairforce1.' "$G")" User "$CLAUDE"
 approve
 run "unticked, Approved-by as the reason"          0 "Approved-by: @blairforce1, an owner of each" "feat: x" "$(checks "$V" "$Pu"$'\n'"      $A" "$G")" User "$CLAUDE"
 approve
-run "login compared without case"                  0 "Approved-by: @blairforce1" "feat: x" "$(checks "$V" "$P" "$G" 'Approved-by: @BlairForce1')" User "$CLAUDE"
+run "login compared without case"                  0 "Approved-by: @blairforce1" "feat: x" "$(checks "$V" "$P" "$G" 'Approved-by: @BlairForce1 3f9c2a7')" User "$CLAUDE"
 approve
 run "Approved-by, CRLF body"                       0 "" "feat: x" "$(checks "$V" "$P" "$G" "$A" | sed 's/$/\r/')" User "$CLAUDE"
 approve
-run "Approved-by naming a non-owner"               1 "'Approved-by: @someone' names no owner of infra/main.tf (owners: @blairforce1)" "feat: x" "$(checks "$V" "$P" "$G" 'Approved-by: @someone')" User "$CLAUDE"
+run "Approved-by naming a non-owner"               1 "'Approved-by: @someone 3f9c2a7' names no owner of infra/main.tf (owners: @blairforce1)" "feat: x" "$(checks "$V" "$P" "$G" 'Approved-by: @someone 3f9c2a7')" User "$CLAUDE"
 approve
-run "Approved-by with anything after the login"    1 "has no 'Approved-by: @login' line" "feat: x" "$(checks "$V" "$P" "$G" "$A pending")" User "$CLAUDE"
+run "Approved-by with anything after the SHA"      1 "3f9c2a7 pending' names no head commit" "feat: x" "$(checks "$V" "$P" "$G" "$A pending")" User "$CLAUDE"
 approve
-run "the key in lower case"                        0 "Approved-by: @blairforce1" "feat: x" "$(checks "$V" "$P" "$G" 'approved-by: @blairforce1')" User "$CLAUDE"
+run "the key in lower case"                        0 "Approved-by: @blairforce1" "feat: x" "$(checks "$V" "$P" "$G" 'approved-by: @blairforce1 3f9c2a7')" User "$CLAUDE"
 approve
-run "the key in trailer case"                      0 "Approved-by: @blairforce1" "feat: x" "$(checks "$V" "$P" "$G" 'Approved-By: @blairforce1')" User "$CLAUDE"
+run "the key in trailer case"                      0 "Approved-by: @blairforce1" "feat: x" "$(checks "$V" "$P" "$G" 'Approved-By: @blairforce1 3f9c2a7')" User "$CLAUDE"
 approve
-run "Approved-by only inside an HTML comment"      1 "has no 'Approved-by: @login' line" "feat: x" "$(checks "$V" "$P" "$G" $'<!--\nApproved-by: @blairforce1\n-->')" User "$CLAUDE"
+run "Approved-by only inside an HTML comment"      1 "has no 'Approved-by: @login <sha>' line" "feat: x" "$(checks "$V" "$P" "$G" $'<!--\nApproved-by: @blairforce1 3f9c2a7\n-->')" User "$CLAUDE"
 TWO=$'/infra/** @ops\n/docs/** @writer @Ops'
 CODEOWNERS="$TWO"; FILES=$'infra/a\ndocs/b'; PROTECTED=true
-run "one owner of two files' owners approves both" 0 "Approved-by: @ops, an owner of each" "feat: x" "$(checks "$V" "$P" "$G" 'Approved-by: @ops')" User "$CLAUDE"
+run "one owner of two files' owners approves both" 0 "Approved-by: @ops, an owner of each" "feat: x" "$(checks "$V" "$P" "$G" 'Approved-by: @ops 3f9c2a7')" User "$CLAUDE"
 CODEOWNERS="$TWO"; FILES=$'infra/a\ndocs/b'; PROTECTED=true
-run "an owner of one file only"                    1 "'Approved-by: @writer' names no owner of infra/a (owners: @ops)" "feat: x" "$(checks "$V" "$P" "$G" 'Approved-by: @writer')" User "$CLAUDE"
+run "an owner of one file only"                    1 "'Approved-by: @writer 3f9c2a7' names no owner of infra/a (owners: @ops)" "feat: x" "$(checks "$V" "$P" "$G" 'Approved-by: @writer 3f9c2a7')" User "$CLAUDE"
 CODEOWNERS="$TWO"; FILES=$'infra/a\ndocs/b'; PROTECTED=true
-run "two owners on one line, and on two lines"     0 "Approved-by: @ops, @writer" "feat: x" "$(checks "$V" "$P" "$G" $'Approved-by: @writer, @ops\nApproved-by: @writer')" User "$CLAUDE"
+run "two owners on one line, and on two lines"     0 "Approved-by: @ops, @writer" "feat: x" "$(checks "$V" "$P" "$G" $'Approved-by: @writer, @ops 3f9c2a7\nApproved-by: @writer 3f9c2a7')" User "$CLAUDE"
 CODEOWNERS=$'/infra/** @ops\n/infra/keys/** @sec # the keys'; FILES='infra/keys/k'; PROTECTED=true
-run "the last matching line decides the owners"    1 "names no owner of infra/keys/k (owners: @sec)" "feat: x" "$(checks "$V" "$P" "$G" 'Approved-by: @ops')" User "$CLAUDE"
+run "the last matching line decides the owners"    1 "names no owner of infra/keys/k (owners: @sec)" "feat: x" "$(checks "$V" "$P" "$G" 'Approved-by: @ops 3f9c2a7')" User "$CLAUDE"
 CODEOWNERS=$'/infra/** @ops\n/infra/free'; FILES='infra/free'; PROTECTED=false
 run "a line with no owners unprotects its files"   0 "No changed file matches" "feat: x" "$(checks "$V" "$P" "$G")" User "$CLAUDE"
 CODEOWNERS=$'/.github/workflows/** @blairforce1'; FILES='.github/workflows/ci.yml'; PROTECTED=true; LABELS='["class:infra"]'
-run "bot on a protected path needs the line"       1 "has no 'Approved-by: @login' line" "$BUMP" "$RENOVATE" 'renovate[bot]' "$BUMP"
+run "bot on a protected path needs the line"       1 "has no 'Approved-by: @login <sha>' line" "$BUMP" "$RENOVATE" 'renovate[bot]' "$BUMP"
 CODEOWNERS=$'/.github/workflows/** @blairforce1'; FILES='.github/workflows/ci.yml'; PROTECTED=true; LABELS='["class:infra"]'
-run "bot on a protected path, approved"            0 "Approved-by: @blairforce1" "$BUMP" "$RENOVATE"$'\n\nApproved-by: @blairforce1' 'renovate[bot]' "$BUMP"
+run "bot on a protected path, approved"            0 "Approved-by: @blairforce1" "$BUMP" "$RENOVATE"$'\n\nApproved-by: @blairforce1 3f9c2a7' 'renovate[bot]' "$BUMP"
+# Stale approvals (decision 0013 of blairforce1/pap): the line names a 7 to
+# 40 character prefix of the head it approves, and any other head refuses it.
+OLD=9b1e44d0c2a6f8e1d3b5a7c9e1f3a5b7d9c1e3f5
+OTHER=e7a0c5d9b3f1a2c4e6b8d0f2a4c6e8b0d2f4a6c8
+PASTE='Paste: Approved-by: @blairforce1 3f9c2a7'
+approve
+run "current head, full SHA"                       0 "at head 3f9c2a7" "feat: x" "$(checks "$V" "$P" "$G" "Approved-by: @blairforce1 $HEAD1")" User "$CLAUDE"
+approve
+run "current head, SHA in upper case"              0 "at head 3f9c2a7" "feat: x" "$(checks "$V" "$P" "$G" 'Approved-by: @blairforce1 3F9C2A7E')" User "$CLAUDE"
+approve
+run "an older head's SHA is stale"                 1 "'Approved-by: @blairforce1 9b1e44d' is stale: it approves 9b1e44d, the head is 3f9c2a7" "feat: x" "$(checks "$V" "$P" "$G" "Approved-by: @blairforce1 ${OLD:0:7}")" User "$CLAUDE"
+approve
+run "stale refusal prints the line to paste"       1 "$PASTE" "feat: x" "$(checks "$V" "$P" "$G" "Approved-by: @blairforce1 ${OLD:0:7}")" User "$CLAUDE"
+approve
+run "a SHA from another branch is stale"           1 "is stale: it approves $OTHER" "feat: x" "$(checks "$V" "$P" "$G" "Approved-by: @blairforce1 $OTHER")" User "$CLAUDE"
+approve
+run "no SHA is refused"                            1 "'Approved-by: @blairforce1' names no head commit" "feat: x" "$(checks "$V" "$P" "$G" 'Approved-by: @blairforce1')" User "$CLAUDE"
+approve
+run "no SHA: refusal prints the line to paste"     1 "$PASTE" "feat: x" "$(checks "$V" "$P" "$G" 'Approved-by: @blairforce1')" User "$CLAUDE"
+approve
+run "a six-character prefix is too short"          1 "'Approved-by: @blairforce1 3f9c2a' names no head commit" "feat: x" "$(checks "$V" "$P" "$G" 'Approved-by: @blairforce1 3f9c2a')" User "$CLAUDE"
+approve
+run "a 41-character SHA is refused"                1 "names no head commit" "feat: x" "$(checks "$V" "$P" "$G" "Approved-by: @blairforce1 ${HEAD1}0")" User "$CLAUDE"
+approve
+run "no line: refusal prints the line to paste"    1 "$PASTE" "feat: x" "$(checks "$V" "$P" "$G")" User "$CLAUDE"
+approve
+run "several lines, one current, pass"             0 "at head 3f9c2a7" "feat: x" "$(checks "$V" "$P" "$G" "Approved-by: @blairforce1 ${OLD:0:7}"$'\nApproved-by: @blairforce1\n'"$A")" User "$CLAUDE"
+approve
+run "several lines, none current"                  1 "is stale" "feat: x" "$(checks "$V" "$P" "$G" "Approved-by: @blairforce1 ${OLD:0:7}"$'\n'"Approved-by: @blairforce1 ${OTHER:0:7}")" User "$CLAUDE"
+approve; HEAD_SHA="$OLD"
+run "the same line after a push is stale"          1 "is stale: it approves 3f9c2a7, the head is 9b1e44d" "feat: x" "$(checks "$V" "$P" "$G" "$A")" User "$CLAUDE"
+CODEOWNERS="$TWO"; FILES=$'infra/a\ndocs/b'; PROTECTED=true
+run "paste line names every owner once"            1 "Paste: Approved-by: @ops, @writer 3f9c2a7" "feat: x" "$(checks "$V" "$P" "$G")" User "$CLAUDE"
 CODEOWNERS="$CO"; FILES='README.md'; PROTECTED=false
 run "no protected path: no line needed"            0 "No changed file matches" "docs: x" "$(checks "$V" "$P" "$G")" User "$CLAUDE"
 
