@@ -15,22 +15,31 @@
 #   - a body with no Change: line, or one naming an id for which the pull
 #     request's head has no changes/<id>/ folder (Change: none is always
 #     accepted);
-#   - anything but exactly one class:* label.
+#   - anything but exactly one class:* label;
+#   - a pull request touching a protected path whose body has no
+#     `Approved-by: @login` line naming an owner of every protected file,
+#     whether its protected-path box is ticked or not: a reason under the
+#     box does not stand in for an approval (decision 0012 of
+#     blairforce1/pap). Bots are not exempt.
 # It also keeps the protected-path label true: when the base branch has a
 # .github/CODEOWNERS, a pull request whose changed files (and the old names
-# of renamed ones) match any of its patterns gets the label, and loses it on
-# a later push that no longer matches. The base branch's file is used, as
+# of renamed ones) have an owner in it gets the label, and loses it on a
+# later push that no longer does. As in CODEOWNERS, the last matching line
+# decides a file's owners. The base branch's file is used, as
 # GitHub does, so a pull request cannot unprotect itself. Patterns are
 # matched by `git check-ignore`, since CODEOWNERS uses gitignore syntax.
-# Each of the last three reports as its own annotation, pass or fail.
-# It cannot find generated content nobody declared. It makes an omission
-# visible, not a false declaration.
+# Change footer, class label and protected paths each report as their own
+# annotation, pass or fail.
+# It cannot find generated content nobody declared, or tell who typed an
+# Approved-by line. It makes an omission visible, not a false declaration.
 #
 # A pull request opened by a bot account (a login ending in [bot], such as
 # renovate[bot]) skips the Checks section and the provenance checks, which
 # ask about a template the bot does not fill. Its title, Change line and
 # class label are still checked, so the bot's configuration must supply
-# them: for Renovate, semanticCommits, labels and prBodyNotes.
+# them: for Renovate, semanticCommits, labels and prBodyNotes. A bot pull
+# request that touches a protected path waits for an owner's Approved-by
+# line like any other.
 # The script is inline so that a caller's @ref pins the rules and the code
 # together; tests/pr-checks.test.sh extracts and runs it. It reads only
 # files and environment; the step before it does every API call.
@@ -215,17 +224,59 @@ jobs:
           if [ -f "$CODEOWNERS_FILE" ]; then
             match="$(mktemp -d)"
             git init -q "$match"
-            { grep -Ev '^[[:space:]]*(#|$)' "$CODEOWNERS_FILE" || true; } | awk '{print $1}' > "$match/patterns"
-            rc=0
-            hits="$(git -C "$match" -c core.excludesFile="$match/patterns" check-ignore --no-index --stdin < "$FILES_FILE")" || rc=$?
-            if [ "$rc" = 0 ]; then
-              protected=true
-              note "Touches protected paths: $(printf '%s' "$hits" | paste -sd, - | sed 's/,/, /g'). The protected-path label is applied; record the approval in the body." "$t"
-            elif [ "$rc" = 1 ]; then
-              protected=false
-              note "No changed file matches .github/CODEOWNERS." "$t"
-            else
+            # One pattern at a time, so a file's owners come from the last
+            # line that matches it, as in CODEOWNERS; with every pattern at
+            # once, check-ignore names the pattern that excluded a parent
+            # directory instead. A last line with no owners unowns the file.
+            rc=0 n=0
+            : > "$match/hits"
+            while IFS= read -r line || [ -n "$line" ]; do
+              n=$((n + 1))
+              pattern="$(printf '%s\n' "$line" | awk '$1 !~ /^#/ { print $1 }')"
+              [ -n "$pattern" ] || continue
+              printf '%s\n' "$pattern" > "$match/patterns"
+              git -C "$match" -c core.excludesFile="$match/patterns" check-ignore --no-index --stdin < "$FILES_FILE" \
+                | sed "s/\$/\t$n/" >> "$match/hits" || { rc=$?; [ "$rc" = 1 ] || break; rc=0; }
+            done < "$CODEOWNERS_FILE"
+            if [ "$rc" != 0 ]; then
               fail "Could not match the changed files against .github/CODEOWNERS (git check-ignore exit $rc)." "$t"
+            else
+              # file<TAB>owners, for each changed file with an owner.
+              owned="$(awk -F'\t' -v co="$CODEOWNERS_FILE" '
+                BEGIN { while ((getline l < co) > 0) { n++; sub(/[[:space:]]#.*$/, "", l)
+                  sub(/^[[:space:]]*[^[:space:]]+[[:space:]]*/, "", l); sub(/[[:space:]]+$/, "", l); owners[n] = l } }
+                { if (!($1 in last)) order[++k] = $1; last[$1] = $2 }
+                END { for (i = 1; i <= k; i++) { o = owners[last[order[i]]]; if (o != "") print order[i] "\t" o } }' "$match/hits")"
+              if [ -z "$owned" ]; then
+                protected=false
+                note "No changed file matches .github/CODEOWNERS." "$t"
+              else
+                protected=true
+                # Decision 0012 in blairforce1/pap: an owner of every
+                # protected file approves it in the body, whatever the box
+                # says. A reason under the box does not stand in for it.
+                files="$(printf '%s\n' "$owned" | cut -f1 | paste -sd, - | sed 's/,/, /g')"
+                login='@[A-Za-z0-9][A-Za-z0-9-]*(/[A-Za-z0-9_.-]+)?'
+                approvers="$(printf '%s\n' "$uncommented" \
+                  | grep -E "^[[:space:]]*Approved-by: *$login( *, *$login)*[[:space:]]*$" \
+                  | grep -oE "$login" | tr '[:upper:]' '[:lower:]' | sort -u | paste -sd, - || true)"
+                if [ -z "$approvers" ]; then
+                  fail "Touches protected paths ($files) but the body has no 'Approved-by: @login' line. An owner from .github/CODEOWNERS ($(printf '%s\n' "$owned" | cut -f2 | tr ' ' '\n' | grep . | sort -u | paste -sd, - | sed 's/,/, /g')) writes it before merge; a reason under the box does not stand in for it." "$t"
+                else
+                  unapproved="$(printf '%s\n' "$owned" | awk -F'\t' -v ok="$approvers" '
+                    BEGIN { n = split(ok, a, ","); for (i = 1; i <= n; i++) set[a[i]] = 1 }
+                    { m = split(tolower($2), o, /[[:space:]]+/); hit = 0
+                      for (i = 1; i <= m; i++) if (o[i] in set) hit = 1
+                      if (!hit) print $1 "\t" $2 }')"
+                  if [ -n "$unapproved" ]; then
+                    while IFS=$'\t' read -r file owners; do
+                      fail "'Approved-by: ${approvers//,/, }' names no owner of $file (owners: ${owners// /, })." "$t"
+                    done <<< "$unapproved"
+                  else
+                    note "Touches protected paths: $files. Approved-by: ${approvers//,/, }, an owner of each." "$t"
+                  fi
+                fi
+              fi
             fi
           else
             note "No .github/CODEOWNERS on the base branch; the protected-path label is left as it is." "$t"
