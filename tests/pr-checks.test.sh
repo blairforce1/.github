@@ -57,10 +57,10 @@ checks() { # checks <box1> <box2> <box3> [trailing text]
   printf 'Change: none\n\n## Summary\nSomething.\n\n## Checks\nTick a box only if it is true. An unticked box needs a one-line reason below it, otherwise the PR is not ready.\n%s\n%s\n%s\n%s' "$1" "$2" "$3" "${4:-}"
 }
 V='- [x] Verification run and output shown above'
-P='- [x] No protected path touched, or the approval is recorded here'
+P='- [x] No protected path touched, or an owner has written `Approved-by: @login` below'
 G='- [x] Generated content carries provenance (model, skill, prompt)'
 Vu='- [ ] Verification run and output shown above'
-Pu='- [ ] No protected path touched, or the approval is recorded here'
+Pu='- [ ] No protected path touched, or an owner has written `Approved-by: @login` below'
 Gu='- [ ] Generated content carries provenance (model, skill, prompt)'
 CLAUDE=$'build(x): y\n\nCo-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>'
 HUMAN=$'docs: fix a typo'
@@ -128,18 +128,64 @@ run "two class labels, both named"                 1 "2 class:* labels: class:fe
 
 # Protected paths.
 CO=$'# generated\n\n/infra/** @blairforce1\n**/*.test.* @blairforce1\n/CLAUDE.md @blairforce1'
+A='Approved-by: @blairforce1'
 CODEOWNERS="$CO"; FILES=$'README.md\ninfra/main.tf\nsrc/a.test.ts'; PROTECTED=true
-run "diff touches protected paths"                 0 "Touches protected paths: infra/main.tf, src/a.test.ts" "feat: x" "$(checks "$V" "$P" "$G")" User "$CLAUDE"
+run "diff touches protected paths, approved"       0 "Touches protected paths: infra/main.tf, src/a.test.ts. Approved-by: @blairforce1" "feat: x" "$(checks "$V" "$P" "$G" "$A")" User "$CLAUDE"
 CODEOWNERS="$CO"; FILES=$'README.md\nsrc/CLAUDE.md\ninfrastructure/x'; PROTECTED=false
 run "diff touches no protected path"               0 "No changed file matches" "feat: x" "$(checks "$V" "$P" "$G")" User "$CLAUDE"
 CODEOWNERS="$CO"; FILES=$'docs/new.md\nCLAUDE.md'; PROTECTED=true
-run "rename away from a protected path matches"    0 "CLAUDE.md" "feat: x" "$(checks "$V" "$P" "$G")" User "$CLAUDE"
+run "rename away from a protected path matches"    0 "CLAUDE.md" "feat: x" "$(checks "$V" "$P" "$G" "$A")" User "$CLAUDE"
 CODEOWNERS='# nothing but comments'; FILES='infra/main.tf'; PROTECTED=false
 run "CODEOWNERS with no patterns"                  0 "No changed file matches" "feat: x" "$(checks "$V" "$P" "$G")" User "$CLAUDE"
 FILES='infra/main.tf'; PROTECTED=''
 run "no CODEOWNERS: label left alone"              0 "No .github/CODEOWNERS on the base branch" "feat: x" "$(checks "$V" "$P" "$G")" User "$CLAUDE"
 CODEOWNERS="$CO"; FILES='infra/main.tf'; PROTECTED=true
 run "protected, and another check fails"           1 "No 'Change:' line" "feat: x" "$(body '')" User "$CLAUDE"
+
+# Approvals on protected paths (decision 0012 of blairforce1/pap): an
+# Approved-by line naming an owner of every protected file, ticked or not.
+# The #46 to #49 cases are those pull requests' boxes as they merged.
+approve() { CODEOWNERS="$CO"; FILES='infra/main.tf'; PROTECTED=true; }
+R="      Adds infra/main.tf. Approval is blairforce1's to record here before merge."
+approve
+run "#46: unticked, approval deferred"             1 "has no 'Approved-by: @login' line. An owner from .github/CODEOWNERS (@blairforce1)" "feat: x" "$(checks "$V" "$Pu"$'\n'"$R" "$G")" User "$CLAUDE"
+approve
+run "#47: ticked, nothing recorded"                1 "has no 'Approved-by: @login' line" "docs: x" "$(checks "$V" "$P" "$G")" User "$CLAUDE"
+approve
+run "#48: approval in prose, not a line"           1 "has no 'Approved-by: @login' line" "feat: x" "$(checks "$V" "$Pu"$'\n'"$R"$'\n      Approved by blairforce1 on 2026-09-25, recorded after the merge.' "$G")" User "$CLAUDE"
+approve
+run "#49: 'Approved by blairforce1.' in prose"     1 "has no 'Approved-by: @login' line" "docs: x" "$(checks "$V" "$Pu"$'\n'"$R"$'\n      Approved by blairforce1.' "$G")" User "$CLAUDE"
+approve
+run "unticked, Approved-by as the reason"          0 "Approved-by: @blairforce1, an owner of each" "feat: x" "$(checks "$V" "$Pu"$'\n'"      $A" "$G")" User "$CLAUDE"
+approve
+run "login compared without case"                  0 "Approved-by: @blairforce1" "feat: x" "$(checks "$V" "$P" "$G" 'Approved-by: @BlairForce1')" User "$CLAUDE"
+approve
+run "Approved-by, CRLF body"                       0 "" "feat: x" "$(checks "$V" "$P" "$G" "$A" | sed 's/$/\r/')" User "$CLAUDE"
+approve
+run "Approved-by naming a non-owner"               1 "'Approved-by: @someone' names no owner of infra/main.tf (owners: @blairforce1)" "feat: x" "$(checks "$V" "$P" "$G" 'Approved-by: @someone')" User "$CLAUDE"
+approve
+run "Approved-by with anything after the login"    1 "has no 'Approved-by: @login' line" "feat: x" "$(checks "$V" "$P" "$G" "$A pending")" User "$CLAUDE"
+approve
+run "Approved-by in lower case is not the key"     1 "has no 'Approved-by: @login' line" "feat: x" "$(checks "$V" "$P" "$G" 'approved-by: @blairforce1')" User "$CLAUDE"
+approve
+run "Approved-by only inside an HTML comment"      1 "has no 'Approved-by: @login' line" "feat: x" "$(checks "$V" "$P" "$G" $'<!--\nApproved-by: @blairforce1\n-->')" User "$CLAUDE"
+TWO=$'/infra/** @ops\n/docs/** @writer @Ops'
+CODEOWNERS="$TWO"; FILES=$'infra/a\ndocs/b'; PROTECTED=true
+run "one owner of two files' owners approves both" 0 "Approved-by: @ops, an owner of each" "feat: x" "$(checks "$V" "$P" "$G" 'Approved-by: @ops')" User "$CLAUDE"
+CODEOWNERS="$TWO"; FILES=$'infra/a\ndocs/b'; PROTECTED=true
+run "an owner of one file only"                    1 "'Approved-by: @writer' names no owner of infra/a (owners: @ops)" "feat: x" "$(checks "$V" "$P" "$G" 'Approved-by: @writer')" User "$CLAUDE"
+CODEOWNERS="$TWO"; FILES=$'infra/a\ndocs/b'; PROTECTED=true
+run "two owners on one line, and on two lines"     0 "Approved-by: @ops, @writer" "feat: x" "$(checks "$V" "$P" "$G" $'Approved-by: @writer, @ops\nApproved-by: @writer')" User "$CLAUDE"
+CODEOWNERS=$'/infra/** @ops\n/infra/keys/** @sec # the keys'; FILES='infra/keys/k'; PROTECTED=true
+run "the last matching line decides the owners"    1 "names no owner of infra/keys/k (owners: @sec)" "feat: x" "$(checks "$V" "$P" "$G" 'Approved-by: @ops')" User "$CLAUDE"
+CODEOWNERS=$'/infra/** @ops\n/infra/free'; FILES='infra/free'; PROTECTED=false
+run "a line with no owners unprotects its files"   0 "No changed file matches" "feat: x" "$(checks "$V" "$P" "$G")" User "$CLAUDE"
+CODEOWNERS=$'/.github/workflows/** @blairforce1'; FILES='.github/workflows/ci.yml'; PROTECTED=true; LABELS='["class:infra"]'
+run "bot on a protected path needs the line"       1 "has no 'Approved-by: @login' line" "$BUMP" "$RENOVATE" 'renovate[bot]' "$BUMP"
+CODEOWNERS=$'/.github/workflows/** @blairforce1'; FILES='.github/workflows/ci.yml'; PROTECTED=true; LABELS='["class:infra"]'
+run "bot on a protected path, approved"            0 "Approved-by: @blairforce1" "$BUMP" "$RENOVATE"$'\n\nApproved-by: @blairforce1' 'renovate[bot]' "$BUMP"
+CODEOWNERS="$CO"; FILES='README.md'; PROTECTED=false
+run "no protected path: no line needed"            0 "No changed file matches" "docs: x" "$(checks "$V" "$P" "$G")" User "$CLAUDE"
 
 printf '\n%s passed, %s failed\n' "$pass" "$failures"
 [ "$failures" = 0 ]
