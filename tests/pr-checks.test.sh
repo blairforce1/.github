@@ -97,6 +97,12 @@ RENOVATE=$'This PR contains the following updates:\n\n| Package | Change |\n|---
 BUMP=$'build(deps): update dependency lefthook to v2.1.15'
 LABELS='["class:infra"]'
 run "bot with the label and the body notes"        0 "Opened by renovate[bot]" "$BUMP" "$RENOVATE" 'renovate[bot]' "$BUMP"
+# A body far past the pipe buffer, matched near its top: grep -q exits early,
+# and pipefail must not turn printf's broken pipe into a miss.
+NOTES="$(printf -- '- a release note line, long enough to fill the pipe buffer.\n%.0s' $(seq 1800))"
+LABELS='["class:infra"]'
+run "long release notes after the Change line"     0 "Change: none" "$BUMP" "$RENOVATE"$'\n\n'"$NOTES" 'renovate[bot]' "$BUMP"
+run "long body after Record and Provenance lines"  0 "" "process: record 0004, x" "$(printf 'Record: 0004\n\n%s\n\n%s' "$(checks "$V" "$P" "$G" $'\nProvenance: Claude')" "$NOTES")" User "$HUMAN"
 LABELS='[]'
 run "bot without the class label"                  1 "title=Class label::No class:* label" "$BUMP" "$RENOVATE" 'renovate[bot]' "$BUMP"
 LABELS='["class:infra"]'

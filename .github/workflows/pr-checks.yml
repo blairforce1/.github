@@ -135,13 +135,13 @@ jobs:
 
           # Title: type(scope): description
           types='feat|fix|docs|style|refactor|perf|test|build|ci|cli|chore|revert|process'
-          if ! printf '%s\n' "$title" | grep -Eq "^($types)(\([a-z0-9][a-z0-9._/-]*\))?!?: [^ ]"; then
+          if ! grep -Eq "^($types)(\([a-z0-9][a-z0-9._/-]*\))?!?: [^ ]" <<< "$title"; then
             fail "Title is not a conventional commit: '$title'. Expected type(scope): description, type one of ${types//|/, }."
           fi
 
           # Rule 1.2: a process change names its decision record.
-          if printf '%s\n' "$title" | grep -Eq '^process(\(|!|:)'; then
-            if ! printf '%s\n' "$body" | grep -Eq '^Record: *[0-9]{4}[[:space:]]*$'; then
+          if grep -Eq '^process(\(|!|:)' <<< "$title"; then
+            if ! grep -Eq '^Record: *[0-9]{4}[[:space:]]*$' <<< "$body"; then
               fail "A process: pull request needs a 'Record: NNNN' line naming its decision record."
             fi
           fi
@@ -175,13 +175,13 @@ jobs:
                 fail "The Checks section has no 'Generated content carries provenance' box."
               else
                 ticked=0
-                printf '%s\n' "$prov" | grep -Eq '\[[xX]\]' && ticked=1
+                grep -Eq '\[[xX]\]' <<< "$prov" && ticked=1
                 recorded=0
-                jq -r '.[]' "$COMMITS_FILE" | tr -d '\r' | grep -Eiq '^co-authored-by: ' && recorded=1
-                printf '%s\n' "$body" | grep -Eq '^Provenance: ' && recorded=1
+                jq -r '.[]' "$COMMITS_FILE" | tr -d '\r' | grep -Ei '^co-authored-by: ' > /dev/null && recorded=1
+                grep -Eq '^Provenance: ' <<< "$body" && recorded=1
                 generated=0
-                jq -r '.[]' "$COMMITS_FILE" | tr -d '\r' | grep -Eiq '^co-authored-by: .*noreply@anthropic\.com' && generated=1
-                printf '%s\n' "$body" | grep -Eq 'Generated with ' && generated=1
+                jq -r '.[]' "$COMMITS_FILE" | tr -d '\r' | grep -Ei '^co-authored-by: .*noreply@anthropic\.com' > /dev/null && generated=1
+                grep -Eq 'Generated with ' <<< "$body" && generated=1
                 if [ "$ticked" = 1 ] && [ "$recorded" = 0 ]; then
                   fail "Provenance is ticked but not recorded: no commit has a Co-authored-by trailer and the body has no 'Provenance:' line."
                 fi
@@ -196,13 +196,13 @@ jobs:
           # head. HTML comments are removed first, as for Checks.
           t='Change footer'
           uncommented="$(printf '%s\n' "$body" | perl -0pe 's/<!--.*?-->//gs')"
-          if ! printf '%s\n' "$uncommented" | grep -Eq '^Change:'; then
+          if ! grep -Eq '^Change:' <<< "$uncommented"; then
             fail "No 'Change:' line. Add 'Change: none', or 'Change: <id>' naming the changes/<id>/ folder this pull request belongs to." "$t"
           else
             change="$(printf '%s\n' "$uncommented" | sed -n 's/^Change:[[:space:]]*//p' | head -n 1 | sed 's/[[:space:]]*$//')"
             if [ "$change" = none ]; then
               note "Change: none" "$t"
-            elif ! printf '%s\n' "$change" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'; then
+            elif ! grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$' <<< "$change"; then
               fail "'Change: $change' is not 'none' or a change id (letters, digits, . _ -)." "$t"
             elif grep -Fxq -- "$change" "$CHANGES_FILE"; then
               note "Change: $change, and changes/$change/ exists" "$t"
