@@ -36,6 +36,16 @@
 # version set fails ("No version is set for shim: uv"). A scanner job's own
 # cache key would never be written, so there is nothing for it to cache; the
 # scanners install at their pinned versions on every run.
+#
+# Each scanner is installed with `mise install` before `mise exec` runs it.
+# `mise exec` installs a missing tool itself, but in prefer-offline mode,
+# which at the pinned mise also turns off the mise-versions mirror, so the
+# release lookup goes to api.github.com, where a hosted runner's shared IP
+# runs out of its 60 anonymous requests an hour (trivy failed this way on
+# arapsys/business-os run 40577563352). The token mise-action exports did
+# not help: mise reported the requests as unauthenticated. `mise install`
+# asks mise-versions. Fixed upstream in jdx/mise#14458 (2026.10); the
+# explicit install stays correct after a bump.
 
 name: security
 
@@ -125,6 +135,7 @@ jobs:
           set -euo pipefail
           # .gitleaks.toml at the root is read when present. --redact keeps
           # the secret out of the log, the summary and the SARIF.
+          mise install "gitleaks@$GITLEAKS_VERSION"
           mise exec "gitleaks@$GITLEAKS_VERSION" -- gitleaks git \
             --log-opts="--no-merges $BASE_SHA..$HEAD_SHA" \
             --redact --no-banner --exit-code 0 \
@@ -220,6 +231,7 @@ jobs:
             | tar -xz -C "$rules" --strip-components=1
           # yaml/ holds the GitHub Actions rules as well as Compose and
           # Kubernetes. .semgrepignore at the root is read when present.
+          mise install "pipx:semgrep@$SEMGREP_VERSION"
           mise exec "pipx:semgrep@$SEMGREP_VERSION" -- semgrep scan --metrics=off --quiet \
             --config "$rules/csharp" --config "$rules/go" --config "$rules/yaml" --config "$rules/dockerfile" \
             --sarif-output="$RUNNER_TEMP/raw.sarif" > /dev/null
@@ -256,6 +268,7 @@ jobs:
           set -euo pipefail
           # trivy.yaml at the root is read when present. Every severity is
           # reported; the gate decides what fails.
+          mise install "trivy@$TRIVY_VERSION"
           mise exec "trivy@$TRIVY_VERSION" -- trivy fs --quiet \
             --scanners vuln,misconfig,secret \
             --format sarif --output "$RUNNER_TEMP/$TOOL.sarif" .
