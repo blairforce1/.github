@@ -145,6 +145,12 @@ The scanner jobs do not read mise-action's cache: the key is the same in
 every job and only `check` writes it, so a scanner would inherit the
 calling repository's tools. `tests/security.test.sh` fails if one does.
 
+Each scanner is installed with `mise install` before `mise exec` runs it.
+At the pinned mise, `mise exec`'s own install skips the mise-versions
+mirror and asks api.github.com, whose anonymous limit a hosted runner's
+shared IP can exhaust. The same test fails on an exec with no install
+before it.
+
 A repository adopts it with this caller, saved as
 `.github/workflows/security.yml`. The pap base template ships it.
 
