@@ -24,8 +24,9 @@ pass=0; failures=0
 #   CODEOWNERS  the base branch's .github/CODEOWNERS; unset means absent
 #   PROTECTED   expected protected= step output: true, false or empty
 #   HEAD_SHA    the pull request's head commit
+#   RISK        the base branch's .github/risk.yml; unset means absent
 HEAD1=3f9c2a7e5b1d4c6a8e0f2b4d6c8a0e2f4b6d8c0a
-reset() { LABELS='["class:feature"]'; FILES=''; CHANGES=''; HEAD_SHA="$HEAD1"; unset CODEOWNERS PROTECTED; }
+reset() { LABELS='["class:feature"]'; FILES=''; CHANGES=''; HEAD_SHA="$HEAD1"; unset CODEOWNERS PROTECTED RISK; }
 reset
 
 # run <name> <expected exit> <expected text or ""> <title> <body> [author login] [commit message...]
@@ -37,11 +38,12 @@ run() {
   printf '%s' "$LABELS" > "$work/labels.json"
   printf '%s' "$FILES" > "$work/files.txt"
   printf '%s' "$CHANGES" > "$work/changes.txt"
-  rm -f "$work/CODEOWNERS" "$work/output"
+  rm -f "$work/CODEOWNERS" "$work/output" "$work/risk.yml" "$work/owned.tsv"
   [ -n "${CODEOWNERS+set}" ] && printf '%s\n' "$CODEOWNERS" > "$work/CODEOWNERS"
+  [ -n "${RISK+set}" ] && printf '%s\n' "$RISK" > "$work/risk.yml"
   out="$(PR_TITLE="$title" PR_BODY="$body" PR_AUTHOR="$author" LABELS_FILE="$work/labels.json" \
     COMMITS_FILE="$work/commits.json" FILES_FILE="$work/files.txt" CHANGES_FILE="$work/changes.txt" \
-    CODEOWNERS_FILE="$work/CODEOWNERS" HEAD_SHA="$HEAD_SHA" GITHUB_OUTPUT="$work/output" bash "$work/check.sh" 2>&1)"
+    CODEOWNERS_FILE="$work/CODEOWNERS" HEAD_SHA="$HEAD_SHA" RISK_FILE="$work/risk.yml" OWNED_FILE="$work/owned.tsv" GITHUB_OUTPUT="$work/output" bash "$work/check.sh" 2>&1)"
   got=$?
   local output_ok=1
   if [ -n "${PROTECTED+set}" ] && ! grep -Fxq "protected=$PROTECTED" "$work/output" 2>/dev/null; then
@@ -229,6 +231,21 @@ CODEOWNERS="$TWO"; FILES=$'infra/a\ndocs/b'; PROTECTED=true
 run "paste line names every owner once"            1 "Paste: Approved-by: @ops, @writer 3f9c2a7" "feat: x" "$(checks "$V" "$P" "$G")" User "$CLAUDE"
 CODEOWNERS="$CO"; FILES='README.md'; PROTECTED=false
 run "no protected path: no line needed"            0 "No changed file matches" "docs: x" "$(checks "$V" "$P" "$G")" User "$CLAUDE"
+
+# The risk gate (blairforce1/pap decision 0016): with .github/risk.yml on
+# the base branch, owner-reviewed on risk:high replaces the Approved-by line.
+approve; RISK='default: low'
+run "risk.yml: protected path needs no Approved-by"  0 "the risk gate decides and no Approved-by line is needed" "feat: x" "$(checks "$V" "$P" "$G")" User "$CLAUDE"
+# The risk step reads the owned files from here.
+if [ "$(cat "$work/owned.tsv" 2>/dev/null)" = "infra/main.tf	@blairforce1" ]; then
+  pass=$((pass + 1)); echo "ok    the owned files are handed to the risk step"
+else
+  failures=$((failures + 1)); echo "FAIL  the owned files are handed to the risk step: $(cat "$work/owned.tsv" 2>&1)"
+fi
+approve; RISK='default: low'
+run "risk.yml: a stale Approved-by is not refused"   0 "" "feat: x" "$(checks "$V" "$P" "$G" "Approved-by: @blairforce1 ${OLD:0:7}")" User "$CLAUDE"
+approve; RISK='default: low'
+run "risk.yml: other checks still run"               1 "No 'Change:' line" "feat: x" "$(body '')" User "$CLAUDE"
 
 printf '\n%s passed, %s failed\n' "$pass" "$failures"
 [ "$failures" = 0 ]

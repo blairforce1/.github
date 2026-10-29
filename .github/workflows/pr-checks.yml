@@ -44,13 +44,25 @@
 # them: for Renovate, semanticCommits, labels and prBodyNotes. A bot pull
 # request that touches a protected path waits for an owner's Approved-by
 # line like any other.
+# A repository whose base branch has .github/risk.yml is in risk mode
+# (decision 0016 of blairforce1/pap). Each changed file gets a level, the
+# first of: fixed high paths, a weakened test, the last matching rule, any
+# other test file (low), a CODEOWNERS owner (high), the default. The pull
+# request gets exactly one risk:high|medium|low label and one sticky
+# "Review focus" comment; risk:high passes only with the owner-reviewed
+# label, which every push removes. Risk mode drops the Approved-by line.
+# See README.md for the config and the patterns.
 # The script is inline so that a caller's @ref pins the rules and the code
 # together; tests/pr-checks.test.sh extracts and runs it. It reads only
 # files and environment; the step before it does every API call.
 #
-# pull-requests: write is for the protected-path label and nothing else. A
-# caller must grant it, and should trigger on labeled and unlabeled so a
-# class label added after opening re-runs the check. On a pull request from
+# Nothing from the pull request's head is checked out or run: its title,
+# body, file names and diff are read through the API as data.
+# pull-requests: write is for the protected-path and risk labels and the
+# Review focus comment, and nothing else. A caller must grant it, and
+# should trigger on labeled and unlabeled so a class label added after
+# opening re-runs the check; risk mode also needs synchronize and labeled,
+# so a push removes owner-reviewed and adding it re-runs the gate. On a pull request from
 # a fork the token stays read-only and the label step warns instead.
 
 name: pr-checks
@@ -69,6 +81,7 @@ jobs:
     if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
     steps:
       - name: Fetch commits, files, change folders and CODEOWNERS
+        id: fetch
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -93,7 +106,8 @@ jobs:
           gh api --paginate --slurp "repos/$REPO/issues/$NUMBER/labels" \
             | jq '[.[][] | .name]' > "$RUNNER_TEMP/labels.json"
           gh api --paginate --slurp "repos/$REPO/pulls/$NUMBER/files" \
-            | jq -r '.[][] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/files.txt"
+            | jq '[.[][] | {filename, status, previous_filename}]' > "$RUNNER_TEMP/files.json"
+          jq -r '.[] | .filename, (.previous_filename // empty)' "$RUNNER_TEMP/files.json" > "$RUNNER_TEMP/files.txt"
           if get "repos/$HEAD_REPO/contents/changes?ref=$HEAD_SHA" > "$RUNNER_TEMP/changes.json"; then
             jq -r '.[] | select(.type == "dir") | .name' "$RUNNER_TEMP/changes.json" > "$RUNNER_TEMP/changes.txt"
           else
@@ -102,6 +116,20 @@ jobs:
           if ! get -H 'Accept: application/vnd.github.raw' \
               "repos/$REPO/contents/.github/CODEOWNERS?ref=$BASE_SHA" > "$RUNNER_TEMP/CODEOWNERS"; then
             rm -f "$RUNNER_TEMP/CODEOWNERS"
+          fi
+          # The risk gate is opted into by the base branch's .github/risk.yml,
+          # never the head's, so a pull request cannot lower its own risk.
+          # The diff is read as text and never run.
+          if get -H 'Accept: application/vnd.github.raw' \
+              "repos/$REPO/contents/.github/risk.yml?ref=$BASE_SHA" > "$RUNNER_TEMP/risk.yml"; then
+            if ! gh api -H 'Accept: application/vnd.github.diff' "repos/$REPO/pulls/$NUMBER" \
+                > "$RUNNER_TEMP/pr.diff" 2> "$RUNNER_TEMP/err"; then
+              echo "::warning title=Risk::Could not fetch the diff, so risk is high: $(head -c 300 "$RUNNER_TEMP/err")"
+              rm -f "$RUNNER_TEMP/pr.diff"
+            fi
+            echo "risk.yml on base: yes, diff: $([ -f "$RUNNER_TEMP/pr.diff" ] && wc -l < "$RUNNER_TEMP/pr.diff" || echo unavailable) lines"
+          else
+            rm -f "$RUNNER_TEMP/risk.yml"
           fi
           echo "commits: $(jq length "$RUNNER_TEMP/commits.json"), labels: $(jq -c . "$RUNNER_TEMP/labels.json"), files: $(wc -l < "$RUNNER_TEMP/files.txt"), change folders: $(wc -l < "$RUNNER_TEMP/changes.txt"), CODEOWNERS on base: $([ -f "$RUNNER_TEMP/CODEOWNERS" ] && echo yes || echo no)"
 
@@ -117,6 +145,8 @@ jobs:
           CHANGES_FILE: ${{ runner.temp }}/changes.txt
           CODEOWNERS_FILE: ${{ runner.temp }}/CODEOWNERS
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RISK_FILE: ${{ runner.temp }}/risk.yml
+          OWNED_FILE: ${{ runner.temp }}/owned.tsv
         shell: bash
         run: |
           set -euo pipefail
@@ -252,9 +282,16 @@ jobs:
                   sub(/^[[:space:]]*[^[:space:]]+[[:space:]]*/, "", l); sub(/[[:space:]]+$/, "", l); owners[n] = l } }
                 { if (!($1 in last)) order[++k] = $1; last[$1] = $2 }
                 END { for (i = 1; i <= k; i++) { o = owners[last[order[i]]]; if (o != "") print order[i] "\t" o } }' "$match/hits")"
+              # The risk step reads the owned files as high.
+              if [ -n "${OWNED_FILE:-}" ]; then printf '%s\n' "$owned" | grep . > "$OWNED_FILE" || true; fi
               if [ -z "$owned" ]; then
                 protected=false
                 note "No changed file matches .github/CODEOWNERS." "$t"
+              elif [ -f "${RISK_FILE:-}" ]; then
+                # Opted into the risk gate: owner-reviewed on risk:high
+                # replaces the Approved-by line.
+                protected=true
+                note "Touches protected paths: $(printf '%s\n' "$owned" | cut -f1 | paste -sd, - | sed 's/,/, /g'). The base branch has .github/risk.yml, so the risk gate decides and no Approved-by line is needed." "$t"
               else
                 protected=true
                 # Decision 0012 in blairforce1/pap: an owner of every
@@ -313,6 +350,260 @@ jobs:
           if [ "$failed" = 0 ]; then echo "pr-checks: title and body pass"; fi
           exit "$failed"
 
+      # The risk gate, for a repository whose base branch has
+      # .github/risk.yml. Decided here, labelled and commented by the last
+      # step. tests/risk.test.sh extracts and runs this script.
+      - name: Assess risk
+        id: risk
+        if: always() && steps.fetch.outcome == 'success'
+        env:
+          RISK_FILE: ${{ runner.temp }}/risk.yml
+          FILES_FILE: ${{ runner.temp }}/files.txt
+          FILES_JSON: ${{ runner.temp }}/files.json
+          DIFF_FILE: ${{ runner.temp }}/pr.diff
+          CODEOWNERS_FILE: ${{ runner.temp }}/CODEOWNERS
+          OWNED_FILE: ${{ runner.temp }}/owned.tsv
+          PROTECTED: ${{ steps.check.outputs.protected }}
+          LABELS_FILE: ${{ runner.temp }}/labels.json
+          EVENT_ACTION: ${{ github.event.action }}
+          COMMENT_FILE: ${{ runner.temp }}/risk-comment.md
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Opted in only when the base branch has .github/risk.yml.
+          if [ ! -f "${RISK_FILE:-}" ]; then echo "No .github/risk.yml on the base branch: no risk label or gate."; exit 0; fi
+          t='Risk'
+          die() { printf '::error title=%s::%s\n' "$t" "$1"; exit 1; }
+          rank() { case "$1" in high) echo 3 ;; medium) echo 2 ;; *) echo 1 ;; esac; }
+          # A file name as a Markdown code span: no backtick or line break can end it.
+          # shellcheck disable=SC2016 # the backticks are Markdown
+          code() { printf '`%s`' "$(printf '%s' "$1" | tr '`\r\n' "'  ")"; }
+
+          cfg="$(yq -o=json '. // {}' "$RISK_FILE")" || die "Could not read .github/risk.yml on the base branch."
+          globs='(type == "array" and all(.[]; type == "string" and length > 0))'
+          jq -e "(type == \"object\")
+            and ((.default // \"low\") | IN(\"high\", \"medium\", \"low\"))
+            and ((.tests // []) | $globs) and ((.coverage // []) | $globs)
+            and ((.rules // []) | type == \"array\" and all(.[];
+              type == \"object\" and (.paths | $globs and length > 0)
+              and (.level | IN(\"high\", \"medium\", \"low\"))
+              and ((.question // \"\") | type == \"string\")))" <<< "$cfg" > /dev/null \
+            || die ".github/risk.yml on the base branch is not valid: 'default' is high, medium or low; 'tests' and 'coverage' are lists of globs; 'rules' is a list of {paths: [globs], level: high|medium|low, question}."
+
+          m="$(mktemp -d)"
+          git init -q "$m"
+          # matching <pattern file> < paths: the paths that match, in CODEOWNERS
+          # (gitignore) syntax. An empty pattern file matches nothing.
+          matching() {
+            [ -s "$1" ] || { cat > /dev/null; return 0; }
+            git -C "$m" -c core.excludesFile="$1" check-ignore --no-index --stdin || [ $? = 1 ]
+          }
+          # Globs from the config, or the defaults when the key is unset.
+          jq -r '(.tests // ["test/", "tests/", "*Tests/", "*.Tests/", "__tests__/", "*.test.*", "*_test.*", "*.spec.*", "*Tests.cs", "test_*.py"])[]' <<< "$cfg" > "$m/tests"
+          jq -r '(.coverage // ["*coverage*", "*ratchet*", "codecov.yml", ".codecov.yml", ".coveragerc", ".nycrc*"])[]' <<< "$cfg" > "$m/coverage"
+          printf '%s\n' '/.github/workflows/**' /.github/CODEOWNERS /.github/risk.yml '/decisions/**' /product/invariants.md > "$m/fixed"
+          # Assertion and skip markers, as extended regular expressions; see README.md.
+          printf '%s\n' '\bAssert[.(]' '\bassert\b' '\bexpect\(' '\.Should' > "$m/assertions"
+          printf '%s\n' '(Fact|Theory)\(.*Skip *=' '\[Ignore' '\[Skip' '@Disabled' '@Ignore' '\.skip\(' '\bxit\(' \
+            '\bxdescribe\(' 'pytest\.mark\.skip' 'unittest\.skip' '\bt\.Skip' '#\[ignore\]' > "$m/skips"
+
+          files="$FILES_FILE"
+          default="$(jq -r '.default // "low"' <<< "$cfg")"
+          # Each file's level is the first of these that applies. They are applied
+          # from the last to the first, so an earlier one overwrites a later one:
+          #   1. fixed high paths; 2. a weakened test; 3. the last matching rule;
+          #   4. any other test file, low; 5. a CODEOWNERS-owned file, high;
+          #   6. default.
+          declare -A level why
+          while IFS= read -r f; do [ -n "$f" ] && level[$f]="$default"; done < "$files"
+
+          # 5. CODEOWNERS. An unfinished CODEOWNERS match fails closed.
+          if [ -f "${CODEOWNERS_FILE:-}" ]; then
+            [ -n "${PROTECTED:-}" ] || die "The CODEOWNERS match did not finish, so the risk cannot be worked out."
+            if [ -s "${OWNED_FILE:-}" ]; then
+              while IFS=$'\t' read -r f owners || [ -n "$f" ]; do
+                level[$f]=high; why[$f]="Owned by ${owners// /, } in CODEOWNERS."
+              done < "$OWNED_FILE"
+            fi
+          fi
+          # 4. Test files.
+          matching "$m/tests" < "$files" > "$m/testfiles"
+          while IFS= read -r f; do level[$f]=low; why[$f]=''; done < "$m/testfiles"
+          # 3. Rules in order: the last that matches a file decides it.
+          n="$(jq '.rules // [] | length' <<< "$cfg")"
+          for ((i = 0; i < n; i++)); do
+            jq -r --argjson i "$i" '.rules[$i].paths[]' <<< "$cfg" > "$m/p"
+            lv="$(jq -r --argjson i "$i" '.rules[$i].level' <<< "$cfg")"
+            q="$(jq -r --argjson i "$i" '.rules[$i].question // ""' <<< "$cfg")"
+            g="$(paste -sd' ' "$m/p")"
+            while IFS= read -r f; do
+              [ -n "$f" ] || continue
+              level[$f]="$lv"; why[$f]="${q:-Matches rule $((i + 1)) ($g).}"
+            done < <(matching "$m/p" < "$files")
+          done
+
+          # 2. Weakened tests. Counts per category go to the heuristic hits.
+          weak() { level[$1]=high; why[$1]="Weakened test: $2"; }
+          hits=()
+          declare -A count
+          gone="$(jq -r '.[] | select(.status == "removed") | .filename' "$FILES_JSON" | matching "$m/tests")"
+          while IFS= read -r f; do [ -z "$f" ] || { weak "$f" "deleted."; count[deleted]=$((${count[deleted]:-0} + 1)); }; done <<< "$gone"
+          # A test renamed out of the test paths is a test deleted.
+          renamed="$(jq -r '.[] | select(.status == "renamed") | [.previous_filename, .filename] | @tsv' "$FILES_JSON")"
+          if [ -n "$renamed" ]; then
+            now="$(cut -f2 <<< "$renamed" | matching "$m/tests")"
+            while IFS=$'\t' read -r a b; do
+              if grep -Fxq -- "$a" "$m/testfiles" && ! grep -Fxq -- "$b" <<< "$now"; then
+                weak "$a" "moved out of the test paths to $(code "$b")."; count[deleted]=$((${count[deleted]:-0} + 1))
+              fi
+            done <<< "$renamed"
+          fi
+          matching "$m/coverage" < "$files" > "$m/covfiles"
+          while IFS= read -r f; do
+            [ -z "$f" ] || { weak "$f" "coverage file deleted."; count[coverage]=$((${count[coverage]:-0} + 1)); }
+          done < <(jq -r '.[] | select(.status == "removed") | .filename' "$FILES_JSON" | grep -Fxf "$m/covfiles" || true)
+
+          if [ ! -f "${DIFF_FILE:-}" ]; then
+            hits+=("The diff could not be fetched, so the tests could not be checked: high.")
+          else
+            # One record per changed line: sign, file, text; "@" and " " records
+            # end a change block. A file's name comes from its +++ line, or the ---
+            # line when it is deleted.
+            awk '
+              /^diff --git / { inhunk = 0; file = ""; next }
+              !inhunk && /^--- / { f = substr($0, 5); gsub(/^"|"$/, "", f); sub(/^a\//, "", f); if (f != "/dev/null") file = f; next }
+              !inhunk && /^\+\+\+ / { f = substr($0, 5); gsub(/^"|"$/, "", f); sub(/^b\//, "", f); if (f != "/dev/null") file = f; next }
+              /^@@ / { inhunk = 1; print "@\t" file "\t"; next }
+              inhunk && /^[-+]/ { print substr($0, 1, 1) "\t" file "\t" substr($0, 2) }
+              inhunk && /^ / { print " \t" file "\t" }
+            ' "$DIFF_FILE" > "$m/lines"
+            # The test files' changed lines: sign and file in one list, the text in
+            # another, line for line, so one grep reads all the text.
+            awk -F'\t' -v meta="$m/meta" -v text="$m/text" 'FNR == NR { t[$0] = 1; next }
+              ($1 == "-" || $1 == "+") && ($2 in t) { print $1 "\t" $2 > meta; s = $0; sub(/^[^\t]*\t[^\t]*\t/, "", s); print s > text }' \
+              "$m/testfiles" "$m/lines"
+            touch "$m/meta" "$m/text"
+            # tally <pattern file>: file<TAB>removed<TAB>added for each test file
+            # with a changed line matching any pattern.
+            tally() {
+              { grep -nEf "$1" "$m/text" || true; } | cut -d: -f1 \
+                | awk -F'\t' 'FNR == NR { hit[$0] = 1; next } FNR in hit {
+                    if (!($2 in r)) { r[$2] = 0; a[$2] = 0; o[++k] = $2 } if ($1 == "-") r[$2]++; else a[$2]++ }
+                    END { for (i = 1; i <= k; i++) print o[i] "\t" r[o[i]] "\t" a[o[i]] }' - "$m/meta"
+            }
+            while IFS=$'\t' read -r f r a; do
+              [ -n "$f" ] && [ "$r" -gt "$a" ] || continue
+              weak "$f" "$r assertion lines removed, $a added."; count[assertions]=$((${count[assertions]:-0} + 1))
+            done < <(tally "$m/assertions")
+            while IFS=$'\t' read -r f r a; do
+              [ -n "$f" ] && [ "$a" -gt "$r" ] || continue
+              weak "$f" "$a skip or ignore markers added, $r removed."; count[skips]=$((${count[skips]:-0} + 1))
+            done < <(tally "$m/skips")
+            # Coverage: a removed line paired with an added one in the same change
+            # block, the same text but for its numbers, with a lower first number.
+            while IFS=$'\t' read -r f old new; do
+              [ -z "$f" ] || { weak "$f" "a number lowered, $old to $new."; count[coverage]=$((${count[coverage]:-0} + 1)); }
+            done < <(awk -F'\t' '
+              FNR == NR { cov[$0] = 1; next }
+              function key(s) { gsub(/[0-9]+(\.[0-9]+)?/, "#", s); gsub(/[[:space:]]+/, " ", s); return s }
+              function flush(   i, ov, nv) {
+                for (i = 1; i <= nr && i <= na; i++) {
+                  if (key(r[i]) != key(a[i]) || !match(r[i], /[0-9]+(\.[0-9]+)?/)) continue
+                  ov = substr(r[i], RSTART, RLENGTH)
+                  if (!match(a[i], /[0-9]+(\.[0-9]+)?/)) continue
+                  nv = substr(a[i], RSTART, RLENGTH)
+                  if (nv + 0 < ov + 0 && !(cur in done)) { done[cur] = 1; print cur "\t" ov "\t" nv }
+                }
+                nr = 0; na = 0
+              }
+              $2 != cur || $1 == "@" || $1 == " " { flush(); cur = $2 }
+              !($2 in cov) { next }
+              $1 == "-" { if (na) flush(); r[++nr] = $3 }
+              $1 == "+" { a[++na] = $3 }
+              END { flush() }
+            ' "$m/covfiles" "$m/lines")
+          fi
+          [ -z "${count[deleted]:-}" ] || hits+=("Test files deleted or moved out of the test paths: ${count[deleted]}.")
+          [ -z "${count[assertions]:-}" ] || hits+=("Test files with more assertion lines removed than added: ${count[assertions]}.")
+          [ -z "${count[skips]:-}" ] || hits+=("Test files with skip or ignore markers added: ${count[skips]}.")
+          [ -z "${count[coverage]:-}" ] || hits+=("Coverage files with a number lowered, or deleted: ${count[coverage]}.")
+
+          # 1. Fixed high paths.
+          while IFS= read -r f; do level[$f]=high; why[$f]="Always high: workflows, CODEOWNERS, risk.yml, decisions and the invariants."; done \
+            < <(matching "$m/fixed" < "$files")
+
+          # A line break in a name splits it in files.txt; tab and other control
+          # characters are not ordinary file names either. High, for a human to read.
+          ctl="$(jq -r '[.[] | .filename, (.previous_filename // empty) | select(test("[\u0000-\u001f\u007f]"))] | length' "$FILES_JSON")"
+          [ "$ctl" = 0 ] || hits+=("File names with control characters: $ctl. Review the file list by hand.")
+
+          # The pull request's level is the highest of its files'. A diff that could
+          # not be read, or a control character in a name, makes it high.
+          risk=low
+          for f in "${!level[@]}"; do [ "$(rank "${level[$f]}")" -gt "$(rank "$risk")" ] && risk="${level[$f]}"; done
+          for h in "${hits[@]}"; do case "$h" in "The diff could not"* | "File names with control"*) risk=high ;; esac; done
+
+          # Labels: exactly one risk:* label. A push takes owner-reviewed away
+          # before anything is judged.
+          has() { jq -e --arg l "$1" 'index($l) != null' "$LABELS_FILE" > /dev/null; }
+          add='' remove=''
+          has "risk:$risk" || add="risk:$risk"
+          for l in risk:high risk:medium risk:low; do [ "$l" = "risk:$risk" ] || ! has "$l" || remove="$remove,$l"; done
+          reviewed=0 unreview=false
+          if has owner-reviewed; then
+            if [ "${EVENT_ACTION:-}" = synchronize ]; then unreview=true; else reviewed=1; fi
+          fi
+
+          # The sticky comment, found again by its first line.
+          {
+            echo '<!-- pap:review-focus -->'
+            echo '## Review focus'
+            echo
+            nf=0
+            for f in "${!level[@]}"; do [ -z "${why[$f]:-}" ] || nf=$((nf + 1)); done
+            echo "Risk: **$risk**. Why: $nf file(s) with a reason below, ${#hits[@]} heuristic hit(s)."
+            if [ "$risk" = high ]; then
+              echo
+              # shellcheck disable=SC2016 # the backticks are Markdown
+              echo 'High risk passes only with the `owner-reviewed` label, added by an owner after reviewing the files and hits below. A push removes it.'
+            fi
+            if [ "$nf" -gt 0 ]; then
+              echo
+              echo '### Files'
+              shown=0
+              while IFS= read -r f; do
+                [ -n "${why[$f]:-}" ] || continue
+                shown=$((shown + 1))
+                [ "$shown" -le 100 ] || continue
+                echo "- **${level[$f]}** $(code "$f"): ${why[$f]}"
+              done < <(printf '%s\n' "${!level[@]}" | sort)
+              [ "$shown" -le 100 ] || echo "- and $((shown - 100)) more."
+            fi
+            if [ "${#hits[@]}" -gt 0 ]; then
+              echo
+              echo '### Heuristic hits'
+              for h in "${hits[@]}"; do echo "- $h"; done
+            fi
+          } > "$COMMENT_FILE"
+
+          {
+            echo "level=$risk"
+            echo "add=$add"
+            echo "remove=${remove#,}"
+            echo "unreview=$unreview"
+          } >> "${GITHUB_OUTPUT:-/dev/null}"
+
+          summary="risk:$risk, ${#hits[@]} heuristic hit(s)"
+          if [ "$risk" != high ]; then
+            printf '::notice title=%s::%s; no review gate below high.\n' "$t" "$summary"
+          elif [ "$reviewed" = 1 ]; then
+            printf '::notice title=%s::%s; owner-reviewed is present.\n' "$t" "$summary"
+          else
+            why=''
+            [ "$unreview" = true ] && why=' A push removed owner-reviewed, so the new head needs a new review.'
+            die "$summary: an owner adds the owner-reviewed label after reviewing the Review focus comment.$why"
+          fi
+
       - name: Apply or remove the protected-path label
         if: always() && steps.check.outputs.protected != ''
         env:
@@ -333,3 +624,59 @@ jobs:
               || echo "::warning title=Protected paths::Could not remove the protected-path label; the token may be read-only (a fork)."
           fi
           echo "protected=$PROTECTED, label was present: $has"
+
+      - name: Apply the risk label and the Review focus comment
+        if: always() && steps.risk.outputs.level != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number }}
+          LEVEL: ${{ steps.risk.outputs.level }}
+          ADD: ${{ steps.risk.outputs.add }}
+          REMOVE: ${{ steps.risk.outputs.remove }}
+          UNREVIEW: ${{ steps.risk.outputs.unreview }}
+          COMMENT_FILE: ${{ runner.temp }}/risk-comment.md
+        shell: bash
+        run: |
+          set -euo pipefail
+          warn() { printf '::warning title=Risk::%s\n' "$1"; }
+          enc() { jq -rn --arg s "$1" '$s | @uri'; }
+          # owner-reviewed first: it is the one that must not survive a push.
+          if [ "$UNREVIEW" = true ]; then
+            gh api -X DELETE "repos/$REPO/issues/$NUMBER/labels/owner-reviewed" > /dev/null \
+              || { echo "::error title=Risk::Could not remove owner-reviewed after a push; remove it by hand before review. The token may be read-only (a fork)."; exit 1; }
+          fi
+          IFS=, read -ra gone <<< "$REMOVE"
+          for l in "${gone[@]}"; do
+            gh api -X DELETE "repos/$REPO/issues/$NUMBER/labels/$(enc "$l")" > /dev/null || warn "Could not remove $l; the token may be read-only (a fork)."
+          done
+          if [ -n "$ADD" ]; then
+            case "$ADD" in risk:high) color=b60205 ;; risk:medium) color=fbca04 ;; *) color=0e8a16 ;; esac
+            # 422 when the label exists already.
+            gh api -X POST "repos/$REPO/labels" -f name="$ADD" -f color="$color" \
+              -f description="Set by pr-checks from .github/risk.yml" > /dev/null 2>&1 || true
+            gh api -X POST "repos/$REPO/issues/$NUMBER/labels" -f "labels[]=$ADD" > /dev/null \
+              || warn "Could not add $ADD; the token may be read-only (a fork)."
+          fi
+          # One comment, found by its marker and author; extra copies are deleted.
+          ids="$(gh api --paginate --slurp "repos/$REPO/issues/$NUMBER/comments" \
+            | jq -r '.[][] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- pap:review-focus -->"))) | "\(.id)\t\(.body | @base64)"')" \
+            || { warn "Could not list comments."; exit 0; }
+          want="$(base64 -w0 < "$COMMENT_FILE")"
+          first=1
+          while IFS=$'\t' read -r id body; do
+            [ -n "$id" ] || continue
+            if [ "$first" = 1 ]; then
+              first=0
+              [ "$body" = "$want" ] && continue
+              jq -n --rawfile b "$COMMENT_FILE" '{body: $b}' | gh api -X PATCH "repos/$REPO/issues/comments/$id" --input - > /dev/null \
+                || warn "Could not update the Review focus comment."
+            else
+              gh api -X DELETE "repos/$REPO/issues/comments/$id" > /dev/null || warn "Could not delete a duplicate Review focus comment."
+            fi
+          done <<< "$ids"
+          if [ "$first" = 1 ]; then
+            jq -n --rawfile b "$COMMENT_FILE" '{body: $b}' | gh api -X POST "repos/$REPO/issues/$NUMBER/comments" --input - > /dev/null \
+              || warn "Could not post the Review focus comment; the token may be read-only (a fork)."
+          fi
+          echo "risk:$LEVEL; added: ${ADD:-none}; removed: ${REMOVE:-none}; owner-reviewed removed: $UNREVIEW"
