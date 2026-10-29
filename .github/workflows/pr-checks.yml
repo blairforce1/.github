@@ -44,13 +44,25 @@
 # them: for Renovate, semanticCommits, labels and prBodyNotes. A bot pull
 # request that touches a protected path waits for an owner's Approved-by
 # line like any other.
+# A repository whose base branch has .github/risk.yml is in risk mode
+# (decision 0016 of blairforce1/pap). Each changed file gets a level, the
+# first of: fixed high paths, a weakened test, the last matching rule, any
+# other test file (low), a CODEOWNERS owner (high), the default. The pull
+# request gets exactly one risk:high|medium|low label and one sticky
+# "Review focus" comment; risk:high passes only with the owner-reviewed
+# label, which every push removes. Risk mode drops the Approved-by line.
+# See README.md for the config and the patterns.
 # The script is inline so that a caller's @ref pins the rules and the code
 # together; tests/pr-checks.test.sh extracts and runs it. It reads only
 # files and environment; the step before it does every API call.
 #
-# pull-requests: write is for the protected-path label and nothing else. A
-# caller must grant it, and should trigger on labeled and unlabeled so a
-# class label added after opening re-runs the check. On a pull request from
+# Nothing from the pull request's head is checked out or run: its title,
+# body, file names and diff are read through the API as data.
+# pull-requests: write is for the protected-path and risk labels and the
+# Review focus comment, and nothing else. A caller must grant it, and
+# should trigger on labeled and unlabeled so a class label added after
+# opening re-runs the check; risk mode also needs synchronize and labeled,
+# so a push removes owner-reviewed and adding it re-runs the gate. On a pull request from
 # a fork the token stays read-only and the label step warns instead.
 
 name: pr-checks

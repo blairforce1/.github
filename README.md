@@ -100,7 +100,8 @@ The check it reports is named `pr-checks / checks`; that is the context a
 ruleset lists to make it required. `edited` is in the trigger list so that
 fixing the body re-runs the check, and `labeled` and `unlabeled` so that
 fixing the class label does. `pull-requests: write` is needed only to add
-and remove the `protected-path` label; the workflow cannot run with less
+and remove the `protected-path` and risk labels and to keep the Review
+focus comment; the workflow cannot run with less
 than it declares. On a pull request from a fork the token stays read-only,
 and the label step warns instead of labelling. The caller pins `@main`: this
 repository's own ruleset guards main, and a fix here reaches every caller
@@ -110,6 +111,90 @@ code together.
 `tests/pr-checks.test.sh` extracts the script and runs it against
 fixtures; `ci.yml` runs the tests and the check itself on every pull
 request here.
+
+### Risk gate
+
+A repository opts in by committing `.github/risk.yml` (decision 0016 of
+`blairforce1/pap`). The workflow reads it from the pull request's base
+commit, never the head, so a pull request cannot lower its own risk: a
+change to `risk.yml` takes effect only for pull requests opened after it
+merges, and is high risk itself. Without the file nothing below applies and
+the Approved-by rule above stands, unchanged.
+
+```yaml
+# .github/risk.yml
+default: low                  # level of a file nothing else matches
+tests: ["**/tests/**", "**/*.Tests/**"]
+coverage: [".config/coverage-baseline.json"]
+rules:                        # the last matching rule wins
+  - paths: ["/AccountsPayable/src/**"]
+    level: medium
+    question: Does a bill that fails a check still go to manual?
+  - paths: ["/product/**"]
+    level: high
+    question: Is the change to the product layer the owner's?
+```
+
+Globs match as CODEOWNERS patterns do. `tests` and `coverage` replace their
+defaults when set (`test/`, `tests/`, `*Tests/`, `*.Tests/`, `__tests__/`,
+`*.test.*`, `*_test.*`, `*.spec.*`, `*Tests.cs`, `test_*.py`; and
+`*coverage*`, `*ratchet*`, `codecov.yml`, `.codecov.yml`, `.coveragerc`,
+`.nycrc*`). A file's level is the first of these that applies:
+
+1. Always high: `/.github/workflows/**`, `/.github/CODEOWNERS`,
+   `/.github/risk.yml`, `/decisions/**`, `/product/invariants.md`.
+2. A weakened test, high: a test file deleted or renamed out of the test
+   paths; more assertion lines removed than added in a test file; more
+   skip or ignore markers added than removed in a test file; a coverage
+   file deleted, or a number lowered on a changed line whose text is
+   otherwise the same.
+3. The last matching rule.
+4. Any other test file: low.
+5. A file with an owner in the base branch's CODEOWNERS: high.
+6. `default`.
+
+The pull request's level is the highest of its files'. It is also high when
+the diff cannot be fetched (too large for the API) or a file name holds a
+control character.
+
+Assertion lines match any of `\bAssert[.(]`, `\bassert\b`, `\bexpect\(`,
+`\.Should` (extended regular expressions). Skip and ignore markers match
+`(Fact|Theory)\(.*Skip *=`, `\[Ignore`, `\[Skip`, `@Disabled`, `@Ignore`,
+`\.skip\(`, `\bxit\(`, `\bxdescribe\(`, `pytest\.mark\.skip`,
+`unittest\.skip`, `\bt\.Skip`, `#\[ignore\]`. Counts are per file, so an
+assertion moved from one test file to another marks the first. The
+heuristics are cheap and can be gamed (a commented-out `Assert` still
+counts); they point a reviewer at a file, they do not prove a test intact.
+
+The workflow keeps exactly one of `risk:high`, `risk:medium` and
+`risk:low` on the pull request, creating the label if the repository lacks
+it, and one comment headed "Review focus", found again by its first line
+`<!-- pap:review-focus -->` and its author `github-actions[bot]`, edited in
+place and never duplicated. It lists each file with a reason (its rule's
+question, its CODEOWNERS owners, the fixed path or the weakened test) and
+the heuristic hits with counts. It does not edit the body.
+
+`risk:high` passes only with the `owner-reviewed` label. On a
+`synchronize` event, any push, the workflow removes `owner-reviewed`
+before judging, so every new head needs a new review; if it cannot remove
+it, the check fails. Medium and low need no label. In a repository with
+`risk.yml` no `Approved-by` line is needed; the `protected-path` label is
+still kept. The check cannot tell who added `owner-reviewed`, as it cannot
+tell who typed an Approved-by line.
+
+The caller is the one above: it already triggers on `synchronize`,
+`labeled` and `unlabeled`, which the gate needs, and `pull-requests: write`
+covers the labels and the comment, so a caller adds only `risk.yml`.
+`tests/risk.test.sh` runs the risk step against fixtures.
+
+Why `pull_request` and not `pull_request_target`: no step checks out or
+runs the pull request's head. Its title, body, file names and diff are read
+through the API as data, passed in environment variables and files, never
+spliced into a script. The write token is the caller's own; on a fork it is
+read-only, so the labels and comment are skipped with a warning, and a
+push whose run cannot remove `owner-reviewed` fails. A later `edited` or
+`labeled` run on that head would still see the label, so a repository that
+takes pull requests from forks should not rely on the gate.
 
 ### security
 
