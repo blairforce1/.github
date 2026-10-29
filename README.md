@@ -86,8 +86,8 @@ A repository adopts it with this caller, saved as
 ```yaml
 name: pr-checks
 on:
-  pull_request:
-    types: [opened, edited, reopened, synchronize, ready_for_review, labeled, unlabeled]
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize, labeled, unlabeled, ready_for_review]
 permissions:
   contents: read
   pull-requests: write
@@ -102,8 +102,7 @@ fixing the body re-runs the check, and `labeled` and `unlabeled` so that
 fixing the class label does. `pull-requests: write` is needed only to add
 and remove the `protected-path` and risk labels and to keep the Review
 focus comment; the workflow cannot run with less
-than it declares. On a pull request from a fork the token stays read-only,
-and the label step warns instead of labelling. The caller pins `@main`: this
+than it declares. The caller pins `@main`: this
 repository's own ruleset guards main, and a fix here reaches every caller
 at once. The script is inline in the workflow, so the ref pins rules and
 code together.
@@ -187,14 +186,18 @@ The caller is the one above: it already triggers on `synchronize`,
 covers the labels and the comment, so a caller adds only `risk.yml`.
 `tests/risk.test.sh` runs the risk step against fixtures.
 
-Why `pull_request` and not `pull_request_target`: no step checks out or
-runs the pull request's head. Its title, body, file names and diff are read
-through the API as data, passed in environment variables and files, never
-spliced into a script. The write token is the caller's own; on a fork it is
-read-only, so the labels and comment are skipped with a warning, and a
-push whose run cannot remove `owner-reviewed` fails. A later `edited` or
-`labeled` run on that head would still see the label, so a repository that
-takes pull requests from forks should not rely on the gate.
+Why `pull_request_target` and not `pull_request`: under `pull_request` a
+pull request runs its own copy of the caller, so it could edit the caller
+to turn the required check green. `pull_request_target` runs the base
+branch's copy. That is safe here because no step checks out or runs the
+pull request's head: its title, body, file names and diff are read through
+the API as data, passed in environment variables and files, never spliced
+into a script, and `risk.yml` and CODEOWNERS are read at the base commit.
+
+One trap when adopting it: the pull request that switches a caller from
+`pull_request` to `pull_request_target` cannot run its own pr-checks. See
+the section "Moving pr-checks to pull_request_target" in pap's
+[`templates/base/README.md`](https://github.com/blairforce1/pap/blob/main/templates/base/README.md).
 
 ### security
 
@@ -250,6 +253,9 @@ jobs:
   security:
     uses: blairforce1/.github/.github/workflows/security.yml@main
 ```
+
+It stays on `pull_request`, unlike pr-checks, because it checks out and
+runs the pull request's head, which must never get a base-branch token.
 
 `security-events: write` is needed only for the upload, but the reusable
 workflow declares it and will not start with less, so a private
