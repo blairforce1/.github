@@ -1,5 +1,5 @@
-# ci.yml: this repository's own checks. `tests` runs the pr-checks and
-# security test suites; `pr-checks` and `security` run the reusable
+# ci.yml: this repository's own checks. `tests` runs the pr-checks, risk
+# and security test suites; `pr-checks` and `security` run the reusable
 # workflows from this branch, so a change to the rules is checked by the
 # rules it proposes.
 name: ci
@@ -25,6 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: bash tests/pr-checks.test.sh
+      - run: bash tests/risk.test.sh
       - run: bash tests/security.test.sh
 
   pr-checks:
