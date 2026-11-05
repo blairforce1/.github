@@ -128,6 +128,14 @@ run "Change: a path, not an id"                    1 "is not 'none' or a change 
 run "Change: id, CRLF body"                        0 "" "feat: x" "$(body 'Change: none' | sed 's/$/\r/')" User "$CLAUDE"
 run "process title: Change: none still needs Record" 1 "Record: NNNN" "process: x" "$(body 'Change: none')" User "$CLAUDE"
 
+# How to revert (template prompt, not a rule): a body without it must pass,
+# and one with it must not disturb the Checks parse.
+revert_body() { printf 'Change: none\n\n## Summary\nSomething.\n\n## How to revert\n%s\n\n%s' "$1" "$(checks "$V" "$P" "$G" | sed 1,2d)"; }
+run "body without a How to revert section"        0 "" "feat: x" "$(checks "$V" "$P" "$G")" User "$CLAUDE"
+run "body with a How to revert section"           0 "" "feat: x" "$(revert_body 'Revert the merge.')" User "$CLAUDE"
+run "How to revert section with only a comment"   0 "" "feat: x" "$(revert_body '<!-- undo steps -->')" User "$CLAUDE"
+run "How to revert does not mask an unexplained box" 1 "Unticked with no reason" "feat: x" "$(revert_body 'Revert the merge.' | sed 's/^- \[x\] Verification/- [ ] Verification/')" User "$CLAUDE"
+
 # Class label.
 LABELS='[]'
 run "zero class labels"                            1 "title=Class label::No class:* label" "feat: x" "$(checks "$V" "$P" "$G")" User "$CLAUDE"

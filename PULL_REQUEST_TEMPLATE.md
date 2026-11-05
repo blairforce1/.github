@@ -12,6 +12,9 @@ Record: none
 ## Verification
 <!-- What you ran and what it showed, or a link to the run. -->
 
+## How to revert
+<!-- Revert the merge, unless the change reaches outside git (settings, rulesets, external systems, machine config): then list the undo steps. Not a checked box. -->
+
 ## Checks
 Tick a box only if it is true. An unticked box needs a one-line reason below it, otherwise the PR is not ready.
 - [ ] Verification run and output shown above

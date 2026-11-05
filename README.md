@@ -1,9 +1,30 @@
 # blairforce1/.github
 
 Default community health files for every repository owned by blairforce1.
-Authored in [blairforce1/pap](https://github.com/blairforce1/pap) under
-`org-github/`, which mirrors this repository's layout. Edit there and push
-here.
+This repository is the source of these files. They were staged in
+[blairforce1/pap](https://github.com/blairforce1/pap) under `org-github/`
+until pap removed that copy (pap#7); edit them here.
+
+## Why this repository is separate from PAP
+
+[PAP](https://github.com/blairforce1/pap) is the process: rules, decisions,
+skills and the template a repository adopts. It cannot hold the files in
+this repository, because GitHub reads them only from an account's own
+`.github` repository.
+
+- What lives here: the default pull request and issue templates,
+  `SECURITY.md`, and the reusable `pr-checks` workflow (and `security`).
+- Why GitHub needs it here: community health files are inherited from the
+  account's `.github` repository (see "Inheritance"), and a reusable
+  workflow is called by each repository by its `owner/repo` path (see
+  "Reusable workflows").
+- How a PAP-adopting repository depends on it: its `pr-checks` caller
+  names `blairforce1/.github/.github/workflows/pr-checks.yml@main`. Without
+  this repository that check cannot run.
+- Adopting PAP under your own account or organisation: create a public
+  `.github` repository there from this one, then point each repository's
+  `pr-checks` and `security` callers at `<your-account>/.github` instead of
+  `blairforce1/.github`. The inherited templates then come from yours.
 
 ## Inheritance
 
