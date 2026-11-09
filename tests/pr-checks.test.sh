@@ -25,8 +25,9 @@ pass=0; failures=0
 #   PROTECTED   expected protected= step output: true, false or empty
 #   HEAD_SHA    the pull request's head commit
 #   RISK        the base branch's .github/risk.yml; unset means absent
+#   ABSENT      text the output must not contain; unset means no such check
 HEAD1=3f9c2a7e5b1d4c6a8e0f2b4d6c8a0e2f4b6d8c0a
-reset() { LABELS='["class:feature"]'; FILES=''; CHANGES=''; HEAD_SHA="$HEAD1"; unset CODEOWNERS PROTECTED RISK; }
+reset() { LABELS='["class:feature"]'; FILES=''; CHANGES=''; HEAD_SHA="$HEAD1"; unset CODEOWNERS PROTECTED RISK ABSENT; }
 reset
 
 # run <name> <expected exit> <expected text or ""> <title> <body> [author login] [commit message...]
@@ -48,6 +49,9 @@ run() {
   local output_ok=1
   if [ -n "${PROTECTED+set}" ] && ! grep -Fxq "protected=$PROTECTED" "$work/output" 2>/dev/null; then
     output_ok=0; out="$out"$'\n'"step output: $(cat "$work/output" 2>/dev/null), want protected=$PROTECTED"
+  fi
+  if [ -n "${ABSENT+set}" ] && printf '%s' "$out" | grep -Fq "$ABSENT"; then
+    output_ok=0; out="$out"$'\n'"output contains '$ABSENT', want it absent"
   fi
   if [ "$got" = "$want" ] && [ "$output_ok" = 1 ] && { [ -z "$grepfor" ] || printf '%s' "$out" | grep -Fq "$grepfor"; }; then
     pass=$((pass + 1)); printf 'ok    %s\n' "$name"
@@ -113,6 +117,17 @@ LABELS='["class:infra"]'
 run "bot with a non-conventional title"            1 "not a conventional commit" "Bump lodash from 1 to 2" "$RENOVATE" 'dependabot[bot]'
 LABELS='["class:infra"]'
 run "[bot] only as a suffix of the login"          1 "No '## Checks' section" "$BUMP" "$RENOVATE" 'renovate[bot]-impostor' "$BUMP"
+LABELS='["class:infra"]'
+run "dependabot[bot] is exempt too"                0 "Opened by dependabot[bot]" "$BUMP" "$RENOVATE" 'dependabot[bot]' "$BUMP"
+
+# Only the allowlisted dependency bots are exempt. An agent app (decision
+# 0023) or any other [bot] login is checked like a person.
+AGENT='example-pap-agent[bot]'
+run "agent app with no Checks section"             1 "No '## Checks' section" "feat: x" $'Change: none\n\n## Summary\nJust text.' "$AGENT" "$CLAUDE"
+ABSENT='are not checked'
+run "agent app with a valid Checks section"        0 "title=Change footer::Change: none" "feat: x" "$(checks "$V" "$P" "$G")" "$AGENT" "$CLAUDE"
+run "agent app, unticked box with no reason"       1 "Unticked with no reason" "feat: x" "$(checks "$Vu" "$P" "$G")" "$AGENT" "$CLAUDE"
+run "unknown [bot] with no Checks section"         1 "No '## Checks' section" "$BUMP" "$RENOVATE" 'odd[bot]' "$BUMP"
 
 # Change footer.
 body() { printf '%s\n\n%s' "$1" "$(checks "$V" "$P" "$G" | sed 1,2d)"; }

@@ -37,13 +37,16 @@
 # It cannot find generated content nobody declared, or tell who typed an
 # Approved-by line. It makes an omission visible, not a false declaration.
 #
-# A pull request opened by a bot account (a login ending in [bot], such as
-# renovate[bot]) skips the Checks section and the provenance checks, which
-# ask about a template the bot does not fill. Its title, Change line and
-# class label are still checked, so the bot's configuration must supply
-# them: for Renovate, semanticCommits, labels and prBodyNotes. A bot pull
-# request that touches a protected path waits for an owner's Approved-by
-# line like any other.
+# A pull request opened by a dependency bot on the allowlist in the check
+# step (exactly renovate[bot] or dependabot[bot]) skips the Checks section
+# and the provenance checks, which ask about a template the bot does not
+# fill. Its title, Change line and class label are still checked, so the
+# bot's configuration must supply them: for Renovate, semanticCommits,
+# labels and prBodyNotes. A bot pull request that touches a protected path
+# waits for an owner's Approved-by line like any other. Every other author
+# is checked in full, any other [bot] login included: an agent app such as
+# <owner>-pap-agent[bot] fills the template and is checked like a person
+# (decision 0023 of blairforce1/pap).
 # A repository whose base branch has .github/risk.yml is in risk mode
 # (decision 0016 of blairforce1/pap). Each changed file gets a level, the
 # first of: fixed high paths, a weakened test, the last matching rule, any
@@ -174,8 +177,17 @@ jobs:
           fail() { printf '::error%s::%s\n' "${2:+ title=$2}" "$1"; failed=1; }
           note() { printf '::notice title=%s::%s\n' "$2" "$1"; }
 
+          # Dependency bots that skip the Checks section and provenance, by
+          # exact login. Any other author, any other [bot] included, is
+          # checked in full. Add a bot here, one per line.
+          exempt_bots=(
+            'renovate[bot]'
+            'dependabot[bot]'
+          )
           bot=0
-          case "${PR_AUTHOR:-}" in *'[bot]') bot=1 ;; esac
+          for b in "${exempt_bots[@]}"; do
+            if [ "${PR_AUTHOR:-}" = "$b" ]; then bot=1; fi
+          done
 
           # Web edits store the body with CRLF line endings.
           body="$(printf '%s' "${PR_BODY:-}" | tr -d '\r')"
