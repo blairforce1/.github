@@ -50,7 +50,12 @@
 # other test file (low), a CODEOWNERS owner (high), the default. The pull
 # request gets exactly one risk:high|medium|low label and one sticky
 # "Review focus" comment; risk:high passes only with the owner-reviewed
-# label, which every push removes. Risk mode drops the Approved-by line.
+# label, which every push removes. Since decision 0023 the label counts
+# only when a User who is an owner in the base branch's CODEOWNERS added it
+# last (read from the issue events); one added by a bot or anyone else is
+# removed. Risk mode drops the Approved-by line.
+# On closed, the merge-report job also runs: a merge by a bot gets a
+# warning and a sticky comment (decision 0023).
 # See README.md for the config and the patterns.
 # The script is inline so that a caller's @ref pins the rules and the code
 # together; tests/pr-checks.test.sh extracts and runs it. It reads only
@@ -79,6 +84,8 @@ jobs:
   checks:
     name: checks
     runs-on: ubuntu-latest
+    # Not skipped on closed: a skipped check run counts as passing, so a
+    # close would overwrite a failing run and a reopen could merge on it.
     if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
     steps:
       - name: Fetch commits, files, change folders and CODEOWNERS
@@ -129,6 +136,16 @@ jobs:
               rm -f "$RUNNER_TEMP/pr.diff"
             fi
             echo "risk.yml on base: yes, diff: $([ -f "$RUNNER_TEMP/pr.diff" ] && wc -l < "$RUNNER_TEMP/pr.diff" || echo unavailable) lines"
+            # Who added owner-reviewed (decision 0023): every page of the
+            # issue events, as fetched; the risk step reads them. Without
+            # them the label does not count.
+            if jq -e 'index("owner-reviewed") != null' "$RUNNER_TEMP/labels.json" > /dev/null; then
+              if ! gh api --paginate --slurp "repos/$REPO/issues/$NUMBER/events" \
+                  > "$RUNNER_TEMP/events.json" 2> "$RUNNER_TEMP/err"; then
+                echo "::warning title=Risk::Could not read the issue events, so owner-reviewed does not count: $(head -c 300 "$RUNNER_TEMP/err")"
+                rm -f "$RUNNER_TEMP/events.json"
+              fi
+            fi
           else
             rm -f "$RUNNER_TEMP/risk.yml"
           fi
@@ -367,6 +384,7 @@ jobs:
           PROTECTED: ${{ steps.check.outputs.protected }}
           LABELS_FILE: ${{ runner.temp }}/labels.json
           EVENT_ACTION: ${{ github.event.action }}
+          EVENTS_FILE: ${{ runner.temp }}/events.json
           COMMENT_FILE: ${{ runner.temp }}/risk-comment.md
         shell: bash
         run: |
@@ -550,9 +568,53 @@ jobs:
           add='' remove=''
           has "risk:$risk" || add="risk:$risk"
           for l in risk:high risk:medium risk:low; do [ "$l" = "risk:$risk" ] || ! has "$l" || remove="$remove,$l"; done
-          reviewed=0 unreview=false
+          reviewed=0 unreview=false gate='' by=''
           if has owner-reviewed; then
-            if [ "${EVENT_ACTION:-}" = synchronize ]; then unreview=true; else reviewed=1; fi
+            if [ "${EVENT_ACTION:-}" = synchronize ]; then
+              unreview=true
+              gate='A push removed owner-reviewed, so the new head needs a new review.'
+            elif [ "$risk" != high ]; then
+              reviewed=1
+            elif [ ! -f "${EVENTS_FILE:-}" ]; then
+              # Not removed: nothing shows it was not the owner's.
+              gate='The issue events could not be read, so owner-reviewed cannot be attributed and does not count. Re-run the check.'
+            else
+              # Decision 0023: the label counts only when its latest labeled
+              # event, with no unlabeled after it, has a User actor who is an
+              # owner in the base branch's CODEOWNERS. Owners are parsed as the
+              # check step does: comments stripped, every field after the
+              # pattern. A team (@org/team) is not resolved, since the token
+              # cannot read team membership, so it matches no login; nor does
+              # an email.
+              owners=''
+              if [ -f "${CODEOWNERS_FILE:-}" ]; then
+                owners="$(sed 's/[[:space:]]#.*$//' "$CODEOWNERS_FILE" \
+                  | awk '$1 !~ /^#/ { for (i = 2; i <= NF; i++) print tolower($i) }' | sort -u)"
+              fi
+              last="$(jq -r '[.[][] | select((.event == "labeled" or .event == "unlabeled") and .label.name == "owner-reviewed")]
+                | last | select(. != null) | [.event, (.actor.login // "unknown"), (.actor.type // "unknown")] | @tsv' "$EVENTS_FILE")" \
+                || die "Could not read the issue events."
+              IFS=$'\t' read -r ev actor kind <<< "$last" || true
+              # Removed only on a positive attribution to someone else: the
+              # events can lag the label, so a missing event keeps it.
+              unreview=true
+              rule="only a CODEOWNERS owner's label counts"
+              if [ -z "$last" ] || [ "$ev" != labeled ]; then
+                unreview=false
+                gate="The issue events show no labeled event for owner-reviewed since its last removal, so it does not count yet; they can lag the label, so re-run the check."
+              elif [ "$kind" != User ] || [[ "$actor" == *'[bot]' ]]; then
+                gate="owner-reviewed was added by $actor ($kind); $rule."
+              elif ! grep -Fxq -- "@$(printf '%s' "$actor" | tr '[:upper:]' '[:lower:]')" <<< "$owners"; then
+                if [ ! -f "${CODEOWNERS_FILE:-}" ]; then
+                  gate="owner-reviewed was added by $actor ($kind), but the base branch has no .github/CODEOWNERS; $rule."
+                else
+                  gate="owner-reviewed was added by $actor ($kind), who is not an owner in the base branch's .github/CODEOWNERS; $rule."
+                  grep -q '/' <<< "$owners" && gate="$gate Team owners (@org/team) are not resolved: the token cannot read team membership, so a team matches no login."
+                fi
+              else
+                unreview=false reviewed=1 by=", added by $actor, a CODEOWNERS owner"
+              fi
+            fi
           fi
 
           # The sticky comment, found again by its first line.
@@ -598,11 +660,9 @@ jobs:
           if [ "$risk" != high ]; then
             printf '::notice title=%s::%s; no review gate below high.\n' "$t" "$summary"
           elif [ "$reviewed" = 1 ]; then
-            printf '::notice title=%s::%s; owner-reviewed is present.\n' "$t" "$summary"
+            printf '::notice title=%s::%s; owner-reviewed is present%s.\n' "$t" "$summary" "$by"
           else
-            why=''
-            [ "$unreview" = true ] && why=' A push removed owner-reviewed, so the new head needs a new review.'
-            die "$summary: an owner adds the owner-reviewed label after reviewing the Review focus comment.$why"
+            die "$summary: an owner adds the owner-reviewed label after reviewing the Review focus comment.${gate:+ $gate}"
           fi
 
       - name: Apply or remove the protected-path label
@@ -642,10 +702,11 @@ jobs:
           set -euo pipefail
           warn() { printf '::warning title=Risk::%s\n' "$1"; }
           enc() { jq -rn --arg s "$1" '$s | @uri'; }
-          # owner-reviewed first: it is the one that must not survive a push.
+          # owner-reviewed first: it must not survive a push, nor stay on when
+          # someone other than a CODEOWNERS owner added it.
           if [ "$UNREVIEW" = true ]; then
             gh api -X DELETE "repos/$REPO/issues/$NUMBER/labels/owner-reviewed" > /dev/null \
-              || { echo "::error title=Risk::Could not remove owner-reviewed after a push; remove it by hand before review. The token may be read-only (a fork)."; exit 1; }
+              || { echo "::error title=Risk::Could not remove owner-reviewed (after a push, or added by someone whose label does not count); remove it by hand. The token may be read-only (a fork)."; exit 1; }
           fi
           IFS=, read -ra gone <<< "$REMOVE"
           for l in "${gone[@]}"; do
@@ -681,3 +742,53 @@ jobs:
               || warn "Could not post the Review focus comment; the token may be read-only (a fork)."
           fi
           echo "risk:$LEVEL; added: ${ADD:-none}; removed: ${REMOVE:-none}; owner-reviewed removed: $UNREVIEW"
+
+  # Decision 0023: GitHub does not refuse a merge by the agent app, so a
+  # merge by a bot is reported, not prevented. Only on closed; the caller
+  # must list closed in its trigger types.
+  # tests/pr-checks.test.sh extracts and runs the merge step's script.
+  merge-report:
+    name: merge-report
+    runs-on: ubuntu-latest
+    if: (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.action == 'closed'
+    steps:
+      - name: Decide the merge report
+        id: merge
+        env:
+          MERGED: ${{ github.event.pull_request.merged }}
+          MERGED_BY: ${{ github.event.pull_request.merged_by.login }}
+          MERGED_BY_TYPE: ${{ github.event.pull_request.merged_by.type }}
+          COMMENT_FILE: ${{ runner.temp }}/merge-comment.md
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${MERGED:-}" != true ]; then echo "Closed without merging: no report."; exit 0; fi
+          by="${MERGED_BY:-unknown}" kind="${MERGED_BY_TYPE:-unknown}"
+          if [ "$kind" != Bot ] && [[ "$by" != *'[bot]' ]]; then echo "Merged by $by ($kind): no report."; exit 0; fi
+          msg="Merged by $by ($kind), a bot. Merging is the owner's act (decision 0023 of blairforce1/pap); GitHub does not refuse a bot's merge, so pr-checks reports it."
+          printf '::warning title=Merged by a bot::%s\n' "$msg"
+          printf '%s\n' '<!-- pap:merge-report -->' '## Merged by a bot' '' "$msg" > "$COMMENT_FILE"
+          echo "report=true" >> "${GITHUB_OUTPUT:-/dev/null}"
+
+      - name: Post the merge report
+        if: steps.merge.outputs.report == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number }}
+          COMMENT_FILE: ${{ runner.temp }}/merge-comment.md
+        shell: bash
+        run: |
+          set -euo pipefail
+          warn() { printf '::warning title=Merged by a bot::%s\n' "$1"; }
+          # One comment, found by its marker and author, edited in place.
+          id="$(gh api --paginate --slurp "repos/$REPO/issues/$NUMBER/comments" \
+            | jq -r '[.[][] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- pap:merge-report -->")))] | first | .id // empty')" \
+            || { warn "Could not list comments."; exit 0; }
+          if [ -n "$id" ]; then
+            jq -n --rawfile b "$COMMENT_FILE" '{body: $b}' | gh api -X PATCH "repos/$REPO/issues/comments/$id" --input - > /dev/null \
+              || warn "Could not update the merge report comment."
+          else
+            jq -n --rawfile b "$COMMENT_FILE" '{body: $b}' | gh api -X POST "repos/$REPO/issues/$NUMBER/comments" --input - > /dev/null \
+              || warn "Could not post the merge report comment; the token may be read-only (a fork)."
+          fi

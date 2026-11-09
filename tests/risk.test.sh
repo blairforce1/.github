@@ -22,28 +22,33 @@ pass=0; failures=0
 #   DIFF      the pull request's diff; unset means it could not be fetched
 #   OWNED     file<TAB>owners lines from the CODEOWNERS match
 #   CO        1 when the base branch has a CODEOWNERS; PROTECTED its output
+#   COTEXT    that CODEOWNERS file's text
+#   EVENTS    the issue events as fetched: a JSON array of pages; unset
+#             means they could not be read
 #   LABELS    JSON array of label names
 #   ACTION    the pull_request event's action
 reset() {
   RISK=''; FILES='[{"filename":"README.md","status":"modified"}]'; DIFF=''
-  OWNED=''; CO=0; PROTECTED=''; LABELS='["class:feature"]'; ACTION=opened
+  OWNED=''; CO=0; COTEXT='* @x'; PROTECTED=''; LABELS='["class:feature"]'; ACTION=opened
+  EVENTS='[[]]'
 }
 reset
 
 # run <name> <expected exit> <expected outputs, space separated k=v> <expected text or ""> [unwanted text]
 run() {
   local name="$1" want="$2" outs="$3" grepfor="$4" unwanted="${5:-}" o
-  rm -f "$work/risk.yml" "$work/pr.diff" "$work/CODEOWNERS" "$work/output" "$work/comment.md"
+  rm -f "$work/risk.yml" "$work/pr.diff" "$work/CODEOWNERS" "$work/output" "$work/comment.md" "$work/events.json"
+  [ -n "${EVENTS+set}" ] && printf '%s' "$EVENTS" > "$work/events.json"
   [ -n "${RISK+set}" ] && printf '%s\n' "$RISK" > "$work/risk.yml"
   [ -n "${DIFF+set}" ] && printf '%s' "$DIFF" > "$work/pr.diff"
-  [ "$CO" = 1 ] && echo '* @x' > "$work/CODEOWNERS"
+  [ "$CO" = 1 ] && printf '%s\n' "$COTEXT" > "$work/CODEOWNERS"
   printf '%s' "$FILES" > "$work/files.json"
   jq -r '.[] | .filename, (.previous_filename // empty)' "$work/files.json" > "$work/files.txt"
   printf '%s' "$OWNED" > "$work/owned.tsv"
   printf '%s' "$LABELS" > "$work/labels.json"
   out="$(RISK_FILE="$work/risk.yml" FILES_FILE="$work/files.txt" FILES_JSON="$work/files.json" \
     DIFF_FILE="$work/pr.diff" CODEOWNERS_FILE="$work/CODEOWNERS" OWNED_FILE="$work/owned.tsv" \
-    PROTECTED="$PROTECTED" LABELS_FILE="$work/labels.json" EVENT_ACTION="$ACTION" \
+    PROTECTED="$PROTECTED" LABELS_FILE="$work/labels.json" EVENT_ACTION="$ACTION" EVENTS_FILE="$work/events.json" \
     COMMENT_FILE="$work/comment.md" GITHUB_OUTPUT="$work/output" bash "$work/risk.sh" 2>&1)"
   got=$?
   out="$out"$'\n'"$(cat "$work/comment.md" 2>/dev/null)"
@@ -72,6 +77,8 @@ diff() {
   [ -z "$3" ] || printf '%s\n' "$3" | sed 's/^/+/'
 }
 mod() { printf '{"filename":"%s","status":"modified"}' "$1"; }
+# ev <event> <actor login> <actor type> [label]: one issue event.
+ev() { printf '{"event":"%s","actor":{"login":"%s","type":"%s"},"label":{"name":"%s"}}' "$1" "$2" "$3" "${4:-owner-reviewed}"; }
 
 # Opt-in.
 unset RISK
@@ -201,8 +208,8 @@ run "a file name cannot break out of its code span"  1 "level=high" "\`tests/a'b
 
 # Labels and the gate.
 CO=1; PROTECTED=true; OWNED=$'infra/main.tf\t@ops'; FILES="[$(mod infra/main.tf)]"
-LABELS='["class:feature","owner-reviewed","risk:high"]'; ACTION=labeled
-run "high with owner-reviewed passes"                0 "level=high add= remove= unreview=false" "owner-reviewed is present"
+LABELS='["class:feature","owner-reviewed","risk:high"]'; ACTION=labeled; EVENTS="[[$(ev labeled x User)]]"
+run "high with owner-reviewed passes"                0 "level=high add= remove= unreview=false" "owner-reviewed is present, added by x, a CODEOWNERS owner"
 CO=1; PROTECTED=true; OWNED=$'infra/main.tf\t@ops'; FILES="[$(mod infra/main.tf)]"
 LABELS='["class:feature","owner-reviewed","risk:high"]'; ACTION=synchronize
 run "a push removes owner-reviewed and refuses"      1 "level=high unreview=true" "A push removed owner-reviewed"
@@ -210,6 +217,50 @@ LABELS='["owner-reviewed","risk:low"]'; ACTION=synchronize
 run "a push removes owner-reviewed at low too"       0 "level=low add= unreview=true" ""
 LABELS='["owner-reviewed"]'; ACTION=edited
 run "owner-reviewed stays on other events"           0 "unreview=false" ""
+# Who added owner-reviewed (decision 0023): the latest labeled event, with
+# no unlabeled after it, by a User who is a CODEOWNERS owner.
+high() { CO=1; PROTECTED=true; OWNED=$'infra/main.tf\t@ops'; FILES="[$(mod infra/main.tf)]"
+  COTEXT=$'# owners\n* @Owner-A # the lead\n/infra/ @ops'; LABELS='["class:feature","owner-reviewed","risk:high"]'; ACTION=labeled; }
+high; EVENTS="[[$(ev labeled owner-a User)]]"
+run "an owner's label counts"                        0 "level=high unreview=false" "added by owner-a, a CODEOWNERS owner"
+high; EVENTS="[[$(ev labeled OWNER-A User)]]"
+run "logins match in any case"                       0 "unreview=false" "added by OWNER-A"
+high; EVENTS="[[$(ev labeled owner-a User),$(ev labeled pap-agent[bot] Bot)]]"
+run "a bot's label is removed and refused"           1 "level=high unreview=true" "owner-reviewed was added by pap-agent[bot] (Bot); only a CODEOWNERS owner's label counts"
+high; EVENTS="[[$(ev labeled sneaky[bot] User)]]"
+run "a [bot] login is refused whatever its type"     1 "unreview=true" "added by sneaky[bot] (User)"
+high; EVENTS="[[$(ev labeled owner-a Bot)]]"
+run "a Bot actor is refused even with an owner login" 1 "unreview=true" "added by owner-a (Bot)"
+high; COTEXT='* @renovate[bot]'; EVENTS="[[$(ev labeled renovate[bot] User)]]"
+run "a [bot] login listed as an owner still fails"   1 "unreview=true" "added by renovate[bot] (User); only"
+high; COTEXT='* @owner-a # ask @someone'; EVENTS="[[$(ev labeled someone User)]]"
+run "a login in a trailing comment is not an owner"  1 "unreview=true" "who is not an owner"
+high; EVENTS="[[$(ev labeled someone User)]]"
+run "a non-owner's label is removed and refused"     1 "unreview=true" "added by someone (User), who is not an owner"
+high; EVENTS="[[$(ev labeled owner-a User),$(ev unlabeled pap-agent[bot] Bot),$(ev labeled owner-a User)]]"
+run "added, removed, added again by an owner"        0 "unreview=false" "added by owner-a"
+high; EVENTS="[[$(ev labeled owner-a User),$(ev unlabeled someone User)]]"
+run "removed after the owner's add: does not count"  1 "unreview=false" "no labeled event for owner-reviewed since its last removal"
+high; LABELS='["class:feature","risk:high"]'; EVENTS="[[$(ev labeled owner-a User),$(ev unlabeled someone User)]]"
+run "removed and not re-added: absent, refused"      1 "unreview=false" "an owner adds the owner-reviewed label" "owner-a"
+high; EVENTS="[[$(ev labeled owner-a User),$(ev labeled class:x pap-agent[bot] Bot)],[$(ev labeled pap-agent[bot] Bot),$(ev labeled owner-a User x)]]"
+run "the latest event is found across pages"         1 "unreview=true" "added by pap-agent[bot] (Bot)"
+high; EVENTS="[[$(ev labeled pap-agent[bot] Bot)],[$(ev labeled owner-a User)]]"
+run "a later page's owner label counts"              0 "unreview=false" "added by owner-a"
+high; EVENTS="[[$(ev labeled other User x)]]"
+run "other labels' events do not count"              1 "unreview=false" "no labeled event"
+high; COTEXT='* @example-org/maintainers'; EVENTS="[[$(ev labeled owner-a User)]]"
+run "a team owner matches no login, and says so"     1 "unreview=true" "Team owners (@org/team) are not resolved"
+high; CO=0; OWNED=''; FILES="[$(mod .github/workflows/ci.yml)]"; EVENTS="[[$(ev labeled owner-a User)]]"
+run "no CODEOWNERS: no label counts"                 1 "unreview=true" "no .github/CODEOWNERS"
+high; COTEXT='# * @owner-a'; EVENTS="[[$(ev labeled owner-a User)]]"
+run "a commented-out owner is not an owner"          1 "unreview=true" "who is not an owner"
+high; unset EVENTS
+run "events unread: refused, label kept"             1 "unreview=false" "could not be read"
+high; ACTION=synchronize; EVENTS="[[$(ev labeled owner-a User)]]"
+run "a push still removes an owner's label"          1 "unreview=true" "A push removed owner-reviewed"
+LABELS='["owner-reviewed","risk:low"]'; EVENTS="[[$(ev labeled pap-agent[bot] Bot)]]"
+run "below high the actor is not judged"             0 "level=low unreview=false" "no review gate below high"
 LABELS='["risk:low","risk:medium","class:x"]'
 CO=1; PROTECTED=true; OWNED=$'infra/main.tf\t@ops'; FILES="[$(mod infra/main.tf)]"
 run "stale risk labels are removed"                  1 "add=risk:high remove=risk:medium,risk:low" ""
@@ -233,12 +284,14 @@ check() { # check <name> <condition result>
 grep -Fq 'contents/.github/risk.yml?ref=$BASE_SHA' <<< "$fetch"; check "risk.yml is read at the base commit" $?
 [ "$(yq '.jobs.checks.steps[] | select(.id == "fetch") | .env.BASE_SHA' "$wf")" = '${{ github.event.pull_request.base.sha }}' ]
 check "BASE_SHA is the pull request's base" $?
+grep -Fq 'gh api --paginate --slurp "repos/$REPO/issues/$NUMBER/events"' <<< "$fetch"
+check "the issue events are read, every page" $?
 apply="$(yq '.jobs.checks.steps[] | select(.name == "Apply the risk label and the Review focus comment") | .run' "$wf")"
 grep -Eq 'labels/owner-reviewed" > /dev/null \\?$' <<< "$apply" && grep -Fq 'exit 1' <<< "$apply"
 check "a failed owner-reviewed removal fails the job" $?
 [ "$(yq '.permissions | to_entries | map(.key + ":" + .value) | join(",")' "$wf")" = 'contents:read,pull-requests:write' ]
 check "permissions stay contents: read, pull-requests: write" $?
-! grep -Eq 'actions/checkout|pull_request_target' <<< "$(yq '.jobs.checks.steps[] | (.uses // "") + (.run // "")' "$wf")"
+! grep -Eq 'actions/checkout|pull_request_target' <<< "$(yq '.jobs[].steps[] | (.uses // "") + (.run // "")' "$wf")"
 check "no step checks out or runs head code" $?
 
 printf '\n%s passed, %s failed\n' "$pass" "$failures"

@@ -199,8 +199,36 @@ the heuristic hits with counts. It does not edit the body.
 before judging, so every new head needs a new review; if it cannot remove
 it, the check fails. Medium and low need no label. In a repository with
 `risk.yml` no `Approved-by` line is needed; the `protected-path` label is
-still kept. The check cannot tell who added `owner-reviewed`, as it cannot
-tell who typed an Approved-by line.
+still kept.
+
+Who added the label matters (decision 0023 of `blairforce1/pap`). On
+`risk:high` the workflow reads every page of the pull request's issue
+events and takes the latest `labeled` event for `owner-reviewed`; an
+`unlabeled` after it means the label does not count. The label counts
+only when that event's actor has `type: User`, a login not ending in
+`[bot]`, and is an owner in the base branch's CODEOWNERS (compared without
+case; comments are stripped as for the protected-path match). When it was
+added by anyone else the workflow removes it, as a push does, and fails
+naming the actor, for example "owner-reviewed was added by pap-agent[bot] (Bot); only
+a CODEOWNERS owner's label counts". A team owner (`@org/team`) matches no
+login, since the Actions token cannot read team membership; the refusal
+says so. Without a CODEOWNERS file no label counts. If the events cannot
+be read, or show no `labeled` event since the last removal (they can lag
+the label), the check fails and leaves the label for a re-run. The check
+still cannot tell who typed an Approved-by line, or whether a person's
+own token was used by someone else.
+
+On `closed`, the `pr-checks / merge-report` job runs too; `checks` runs as
+on any event and is never skipped, since a skipped check run counts as
+passing and a close then reopen could merge on it. A pull request
+merged by a bot (`merged_by.type` `Bot`, or a login ending in `[bot]`)
+gets a `::warning` and one comment headed "Merged by a bot", found again
+by its first line `<!-- pap:merge-report -->` and edited in place, naming
+the account and decision 0023. GitHub does not refuse such a merge; this
+reports it. A merge by a person, or a close without merging, does nothing.
+The caller must list `closed` in its trigger types for this to run; the
+caller above does not yet, and a follow-up change in `blairforce1/pap`
+adds it.
 
 The caller is the one above: it already triggers on `synchronize`,
 `labeled` and `unlabeled`, which the gate needs, and `pull-requests: write`
