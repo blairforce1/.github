@@ -255,5 +255,38 @@ run "risk.yml: a stale Approved-by is not refused"   0 "" "feat: x" "$(checks "$
 approve; RISK='default: low'
 run "risk.yml: other checks still run"               1 "No 'Change:' line" "feat: x" "$(body '')" User "$CLAUDE"
 
+# The merge report (decision 0023): on closed, a merge by a bot is
+# reported; a person's merge or an unmerged close is not.
+yq '.jobs.merge-report.steps[] | select(.id == "merge") | .run' \
+  "$root/.github/workflows/pr-checks.yml" > "$work/merge.sh"
+# merged <name> <merged> <login> <type> <want report: true|none> <expected text>
+merged() {
+  rm -f "$work/output" "$work/merge.md"
+  out="$(MERGED="$2" MERGED_BY="$3" MERGED_BY_TYPE="$4" COMMENT_FILE="$work/merge.md" GITHUB_OUTPUT="$work/output" bash "$work/merge.sh" 2>&1)"
+  got=$?
+  out="$out"$'\n'"$(cat "$work/merge.md" 2>/dev/null)"
+  local ok=1
+  if [ "$5" = true ]; then grep -Fxq report=true "$work/output" 2>/dev/null && [ "$(head -n 1 "$work/merge.md")" = '<!-- pap:merge-report -->' ] || ok=0
+  else [ ! -s "$work/output" ] && [ ! -e "$work/merge.md" ] || ok=0; fi
+  if [ "$got" = 0 ] && [ "$ok" = 1 ] && printf '%s' "$out" | grep -Fq -- "$6"; then
+    pass=$((pass + 1)); printf 'ok    %s\n' "$1"
+  else
+    failures=$((failures + 1)); printf 'FAIL  %s (exit %s)\n%s\n' "$1" "$got" "$out"
+  fi
+}
+merged "merged by a Bot: warning and comment"      true  'pap-agent[bot]' Bot   true '::warning title=Merged by a bot::Merged by pap-agent[bot] (Bot), a bot.'
+merged "the report names decision 0023"            true  'pap-agent[bot]' Bot   true 'decision 0023 of blairforce1/pap'
+merged "a [bot] login is a bot whatever its type"  true  'odd[bot]'       User  true 'Merged by odd[bot] (User)'
+merged "merged by a User: no report"               true  blairforce1      User  none 'Merged by blairforce1 (User): no report.'
+merged "closed unmerged: nothing"                  false ''               ''    none 'Closed without merging: no report.'
+merged "closed unmerged by a bot: nothing"         false 'pap-agent[bot]' Bot   none 'Closed without merging'
+wf="$root/.github/workflows/pr-checks.yml"
+if [ "$(yq '.jobs.checks.if' "$wf")" = "(github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.action != 'closed'" ] \
+    && [ "$(yq '.jobs.merge-report.if' "$wf")" = "(github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.action == 'closed'" ]; then
+  pass=$((pass + 1)); echo "ok    on closed only the merge report runs"
+else
+  failures=$((failures + 1)); echo "FAIL  on closed only the merge report runs"
+fi
+
 printf '\n%s passed, %s failed\n' "$pass" "$failures"
 [ "$failures" = 0 ]
