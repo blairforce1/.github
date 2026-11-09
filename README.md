@@ -215,6 +215,19 @@ pull request's head: its title, body, file names and diff are read through
 the API as data, passed in environment variables and files, never spliced
 into a script, and `risk.yml` and CODEOWNERS are read at the base commit.
 
+Public caller repositories need one setting from 2026-12-02. GitHub's
+default event policy then blocks `pull_request_target` in public
+repositories, and during the brownouts before that date a run already
+fails with `startup_failure` and "brownout of the default
+pull_request_target protection". The fix is an Actions policy (Settings >
+Actions > Policies, "Restrict events") that permits `pull_request_target`
+for the pr-checks caller workflow's path only. It stays safe while the
+conditions above hold: the reusable workflow never checks out or runs head
+code, passes pull request fields only through the environment, asks for a
+token with `contents: read` and `pull-requests: write` alone, and uses no
+secrets. See GitHub's
+[Securely using pull_request_target](https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target).
+
 One trap when adopting it: the pull request that switches a caller from
 `pull_request` to `pull_request_target` cannot run its own pr-checks. See
 the section "Moving pr-checks to pull_request_target" in pap's
