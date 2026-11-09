@@ -207,17 +207,20 @@ events and takes the latest `labeled` event for `owner-reviewed`; an
 `unlabeled` after it means the label does not count. The label counts
 only when that event's actor has `type: User`, a login not ending in
 `[bot]`, and is an owner in the base branch's CODEOWNERS (compared without
-case; comments are stripped as for the protected-path match). Otherwise
-the workflow removes the label, as a push does, and fails naming the
-actor, for example "owner-reviewed was added by pap-agent[bot] (Bot); only
+case; comments are stripped as for the protected-path match). When it was
+added by anyone else the workflow removes it, as a push does, and fails
+naming the actor, for example "owner-reviewed was added by pap-agent[bot] (Bot); only
 a CODEOWNERS owner's label counts". A team owner (`@org/team`) matches no
 login, since the Actions token cannot read team membership; the refusal
 says so. Without a CODEOWNERS file no label counts. If the events cannot
-be read, the check fails and leaves the label for a re-run. The check
+be read, or show no `labeled` event since the last removal (they can lag
+the label), the check fails and leaves the label for a re-run. The check
 still cannot tell who typed an Approved-by line, or whether a person's
 own token was used by someone else.
 
-On `closed`, only the `pr-checks / merge-report` job runs. A pull request
+On `closed`, the `pr-checks / merge-report` job runs too; `checks` runs as
+on any event and is never skipped, since a skipped check run counts as
+passing and a close then reopen could merge on it. A pull request
 merged by a bot (`merged_by.type` `Bot`, or a login ending in `[bot]`)
 gets a `::warning` and one comment headed "Merged by a bot", found again
 by its first line `<!-- pap:merge-report -->` and edited in place, naming

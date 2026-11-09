@@ -54,8 +54,8 @@
 # only when a User who is an owner in the base branch's CODEOWNERS added it
 # last (read from the issue events); one added by a bot or anyone else is
 # removed. Risk mode drops the Approved-by line.
-# On closed, only the merge-report job runs: a merge by a bot gets a
-# warning and a sticky comment (decision 0023); nothing else is checked.
+# On closed, the merge-report job also runs: a merge by a bot gets a
+# warning and a sticky comment (decision 0023).
 # See README.md for the config and the patterns.
 # The script is inline so that a caller's @ref pins the rules and the code
 # together; tests/pr-checks.test.sh extracts and runs it. It reads only
@@ -84,7 +84,9 @@ jobs:
   checks:
     name: checks
     runs-on: ubuntu-latest
-    if: (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.action != 'closed'
+    # Not skipped on closed: a skipped check run counts as passing, so a
+    # close would overwrite a failing run and a reopen could merge on it.
+    if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
     steps:
       - name: Fetch commits, files, change folders and CODEOWNERS
         id: fetch
@@ -593,12 +595,13 @@ jobs:
                 | last | select(. != null) | [.event, (.actor.login // "unknown"), (.actor.type // "unknown")] | @tsv' "$EVENTS_FILE")" \
                 || die "Could not read the issue events."
               IFS=$'\t' read -r ev actor kind <<< "$last" || true
+              # Removed only on a positive attribution to someone else: the
+              # events can lag the label, so a missing event keeps it.
               unreview=true
               rule="only a CODEOWNERS owner's label counts"
-              if [ -z "$last" ]; then
-                gate="owner-reviewed has no labeled event in the issue events; $rule."
-              elif [ "$ev" != labeled ]; then
-                gate="owner-reviewed was removed after it was last added; $rule."
+              if [ -z "$last" ] || [ "$ev" != labeled ]; then
+                unreview=false
+                gate="The issue events show no labeled event for owner-reviewed since its last removal, so it does not count yet; they can lag the label, so re-run the check."
               elif [ "$kind" != User ] || [[ "$actor" == *'[bot]' ]]; then
                 gate="owner-reviewed was added by $actor ($kind); $rule."
               elif ! grep -Fxq -- "@$(printf '%s' "$actor" | tr '[:upper:]' '[:lower:]')" <<< "$owners"; then
@@ -741,8 +744,8 @@ jobs:
           echo "risk:$LEVEL; added: ${ADD:-none}; removed: ${REMOVE:-none}; owner-reviewed removed: $UNREVIEW"
 
   # Decision 0023: GitHub does not refuse a merge by the agent app, so a
-  # merge by a bot is reported, not prevented. Only on closed, and only this
-  # job; the caller must list closed in its trigger types.
+  # merge by a bot is reported, not prevented. Only on closed; the caller
+  # must list closed in its trigger types.
   # tests/pr-checks.test.sh extracts and runs the merge step's script.
   merge-report:
     name: merge-report

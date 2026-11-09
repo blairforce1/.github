@@ -282,11 +282,11 @@ merged "merged by a User: no report"               true  blairforce1      User  
 merged "closed unmerged: nothing"                  false ''               ''    none 'Closed without merging: no report.'
 merged "closed unmerged by a bot: nothing"         false 'pap-agent[bot]' Bot   none 'Closed without merging'
 wf="$root/.github/workflows/pr-checks.yml"
-if [ "$(yq '.jobs.checks.if' "$wf")" = "(github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.action != 'closed'" ] \
+if [ "$(yq '.jobs.checks.if' "$wf")" = "github.event_name == 'pull_request' || github.event_name == 'pull_request_target'" ] \
     && [ "$(yq '.jobs.merge-report.if' "$wf")" = "(github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.action == 'closed'" ]; then
-  pass=$((pass + 1)); echo "ok    on closed only the merge report runs"
+  pass=$((pass + 1)); echo "ok    checks is never skipped; the merge report runs on closed only"
 else
-  failures=$((failures + 1)); echo "FAIL  on closed only the merge report runs"
+  failures=$((failures + 1)); echo "FAIL  checks is never skipped; the merge report runs on closed only"
 fi
 
 printf '\n%s passed, %s failed\n' "$pass" "$failures"
