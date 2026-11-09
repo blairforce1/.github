@@ -277,6 +277,7 @@ merged() {
 merged "merged by a Bot: warning and comment"      true  'pap-agent[bot]' Bot   true '::warning title=Merged by a bot::Merged by pap-agent[bot] (Bot), a bot.'
 merged "the report names decision 0023"            true  'pap-agent[bot]' Bot   true 'decision 0023 of blairforce1/pap'
 merged "a [bot] login is a bot whatever its type"  true  'odd[bot]'       User  true 'Merged by odd[bot] (User)'
+merged "a Bot type is a bot whatever its login"   true  some-app         Bot   true 'Merged by some-app (Bot)'
 merged "merged by a User: no report"               true  blairforce1      User  none 'Merged by blairforce1 (User): no report.'
 merged "closed unmerged: nothing"                  false ''               ''    none 'Closed without merging: no report.'
 merged "closed unmerged by a bot: nothing"         false 'pap-agent[bot]' Bot   none 'Closed without merging'
